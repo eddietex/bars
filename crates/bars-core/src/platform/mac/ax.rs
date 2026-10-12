@@ -164,11 +164,29 @@ fn utf16_slice(units: &[u16], start: i64, end: i64) -> String {
     String::from_utf16_lossy(&units[start..end.max(start)])
 }
 
-fn surroundings(field: &Element, chars: usize) -> Option<Surroundings> {
+/// A terminal's text is its screen and scrollback, and the cursor it
+/// reports means nothing (Ghostty: always the start). New text is at the
+/// end, so read the last `chars` characters.
+fn terminal_tail(field: &Element, chars: usize) -> Option<Surroundings> {
+    let count = field.int("AXNumberOfCharacters")?;
+    let n = (chars as i64).min(count);
+    let before = if count <= READ_WHOLE_UP_TO {
+        let units: Vec<u16> = field.string("AXValue")?.encode_utf16().collect();
+        utf16_slice(&units, units.len() as i64 - n, units.len() as i64)
+    } else {
+        field.string_for_range(count - n, n)?
+    };
+    Some(Surroundings { before, selected: String::new(), after: String::new() })
+}
+
+fn surroundings(field: &Element, chars: usize, terminal: bool) -> Option<Surroundings> {
     let role = field.string("AXRole");
     let subrole = field.string("AXSubrole");
     if [role.as_deref(), subrole.as_deref()].contains(&Some("AXSecureTextField")) {
         return None;
+    }
+    if terminal {
+        return terminal_tail(field, chars);
     }
     let (location, length) = field.range("AXSelectedTextRange")?;
     let (end, n) = (location + length, chars as i64);
@@ -202,7 +220,8 @@ pub fn read_focus(field_chars: Option<usize>) -> Focus {
         expose_accessibility(&app, pid, bundle.as_deref());
     }
     let window_title = app.element("AXFocusedWindow").and_then(|w| w.string("AXTitle"));
-    let field = field_chars.and_then(|n| app.element("AXFocusedUIElement").and_then(|f| surroundings(&f, n)));
+    let terminal = bundle.as_deref().is_some_and(crate::platform::focus::is_terminal);
+    let field = field_chars.and_then(|n| app.element("AXFocusedUIElement").and_then(|f| surroundings(&f, n, terminal)));
     Focus {
         app: bundle,
         pid: pid.map(|p| p as u32),

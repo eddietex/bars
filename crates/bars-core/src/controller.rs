@@ -17,7 +17,7 @@ use crate::config::{Config, InsertionConfig, Replacement, Suggestion};
 use crate::engine::{Engine, EngineEvent, EngineStatus};
 use crate::history::{self, History, Stats};
 use crate::hotkey::{Activation, Chord, HotkeyEvent, Intent, Mods, Recognizer};
-use crate::learn::{self, Heard, Pieces, Placement, Verdict};
+use crate::learn::{self, Heard, Pieces, Tracker, Verdict};
 use crate::models;
 use crate::paths;
 use crate::platform::focus::{self, Focus};
@@ -177,6 +177,15 @@ const FOCUS_TIMEOUT: Duration = Duration::from_millis(400);
 /// long, to see corrections.
 const WATCH_EVERY: Duration = Duration::from_secs(1);
 const WATCH_FOR: Duration = Duration::from_secs(60);
+/// Characters read on each side of the cursor while watching: in effect
+/// the whole field (a terminal's whole screen).
+const WATCH_CHARS: usize = 20_000;
+/// A correction counts once the text stayed the same for this many reads
+/// (the user stopped typing).
+const SETTLED_READS: u32 = 3;
+/// Consecutive reads without the dictation (a terminal program redrawing)
+/// before watching stops.
+const MISSES_ALLOWED: u32 = 5;
 /// Recent dictations whose model confidences are kept for learning.
 const HEARD_KEPT: usize = 32;
 /// How often macOS is asked whether another app holds secure input.
@@ -231,6 +240,9 @@ struct Controller {
     entry_requests: VecDeque<(u64, u64)>,
     /// Bumped when a dictation starts: watchers of earlier ones stop.
     watch_generation: Arc<AtomicU64>,
+    /// Corrections already judged, per engine request: one dictation
+    /// edited in stages is reported more than once.
+    judged: VecDeque<(u64, String, String)>,
 }
 
 impl Controller {
@@ -282,6 +294,7 @@ impl Controller {
             heard: VecDeque::new(),
             entry_requests: VecDeque::new(),
             watch_generation,
+            judged: VecDeque::new(),
         }
     }
 
@@ -949,6 +962,16 @@ impl Controller {
         let heard = request.and_then(|r| self.heard.iter().find(|(id, _)| *id == r)).map(|(_, h)| h.clone());
         let mut changed = false;
         for edit in edits {
+            if let Some(r) = request {
+                let key = (r, edit.from.clone(), edit.to.clone());
+                if self.judged.contains(&key) {
+                    continue;
+                }
+                self.judged.push_back(key);
+                if self.judged.len() > 256 {
+                    self.judged.pop_front();
+                }
+            }
             let confidence = heard.as_ref().and_then(|h| learn::confidence_of(&edit, h));
             let known: Vec<Replacement> =
                 self.cfg.text.dictionary.iter().chain(&self.cfg.text.ignored).cloned().collect();
@@ -1037,12 +1060,12 @@ fn spawn_inserter(
                         let focus = focus.unwrap_or_default();
                         let inserted =
                             insert_text(&mut injector, &ui, held.as_deref(), &text, &cfg, &names, &focus);
-                        if let (Some(request), Some(inserted), Some(field)) = (watch, inserted, focus.field.as_ref()) {
+                        if let (Some(request), Some(inserted), true) = (watch, inserted, focus.field.is_some()) {
                             let generation = watch_generation.load(Ordering::Relaxed);
                             let watch = Watch {
                                 request,
+                                tracker: Tracker::new(&inserted),
                                 inserted,
-                                placement: Placement::new(field),
                                 pid: focus.pid,
                             };
                             let (internal, gen_now) = (internal.clone(), watch_generation.clone());
@@ -1074,42 +1097,61 @@ fn spawn_inserter(
 }
 
 /// Follows a dictation in its field for a minute, to see whether the user
-/// corrects it. Stops early when another dictation starts, focus moves to
-/// another app, or the text around it goes (a chat message was sent).
+/// corrects it. A correction is reported once the text stops changing for
+/// a few seconds, and again if it changes after. Stops when another
+/// dictation starts, focus moves to another app, or the dictation is gone
+/// (a chat message was sent).
 struct Watch {
     request: u64,
     inserted: String,
-    placement: Placement,
+    tracker: Tracker,
     pid: Option<u32>,
 }
 
 impl Watch {
-    fn run(self, generation: u64, current: &AtomicU64, internal: &Sender<Internal>) {
-        let chars = self.inserted.chars().count() + 300;
+    fn run(mut self, generation: u64, current: &AtomicU64, internal: &Sender<Internal>) {
+        let inserted = self.inserted.trim().to_string();
         let deadline = Instant::now() + WATCH_FOR;
-        let mut last: Option<String> = None;
+        let (mut last, mut reported) = (None::<String>, inserted.clone());
+        let (mut steady, mut misses) = (0u32, 0u32);
+        let report = |edited: &str| {
+            let _ = internal.send(Internal::Corrected {
+                request: self.request,
+                inserted: inserted.clone(),
+                edited: edited.to_string(),
+            });
+        };
         while Instant::now() < deadline {
             thread::sleep(WATCH_EVERY);
             if current.load(Ordering::Relaxed) != generation {
                 break;
             }
-            let now = focus::capture(Some(chars), FOCUS_TIMEOUT);
+            let now = focus::capture(Some(WATCH_CHARS), FOCUS_TIMEOUT);
             if now.pid != self.pid {
                 break;
             }
-            let Some(field) = now.field else { break };
-            let text = format!("{}{}{}", field.before, field.selected, field.after);
-            match self.placement.locate(&text, self.inserted.len()) {
-                Some(found) => last = Some(found),
-                None => break,
+            let found = now.field.and_then(|f| self.tracker.locate(&format!("{}{}{}", f.before, f.selected, f.after)));
+            let Some(found) = found else {
+                misses += 1;
+                if misses >= MISSES_ALLOWED {
+                    break;
+                }
+                continue;
+            };
+            misses = 0;
+            if last.as_deref() == Some(found.as_str()) {
+                steady += 1;
+            } else {
+                (last, steady) = (Some(found), 1);
+            }
+            let settled = last.as_ref().filter(|l| steady >= SETTLED_READS && **l != reported);
+            if let Some(edited) = settled {
+                report(edited);
+                reported = edited.clone();
             }
         }
-        if let Some(edited) = last.filter(|e| *e != self.inserted.trim()) {
-            let _ = internal.send(Internal::Corrected {
-                request: self.request,
-                inserted: self.inserted.trim().to_string(),
-                edited,
-            });
+        if let Some(edited) = last.filter(|l| *l != reported) {
+            report(&edited);
         }
     }
 }
@@ -1127,7 +1169,8 @@ fn insert_text(
     focus: &Focus,
 ) -> Option<String> {
     log::debug!("inserting into {}", focus.summary());
-    let text = match focus.field.as_ref().filter(|_| cfg.smart_spacing) {
+    // A terminal's cursor position can't be trusted: no context.
+    let text = match focus.field.as_ref().filter(|_| cfg.smart_spacing && !focus.in_terminal()) {
         Some(field) => text::fit_to_field(text, field, cfg.trailing_space, names),
         None => text::finalize(text, cfg.trailing_space),
     };

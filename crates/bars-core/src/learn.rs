@@ -195,50 +195,91 @@ pub fn confidence_of(edit: &Edit, heard: &[Heard]) -> Option<f32> {
         .map(|i| heard[i..i + want.len()].iter().map(|h| h.confidence).fold(1.0, f32::min))
 }
 
-/// Where a dictation went in its field: the text right before and after
-/// it, to find it again while the user edits.
-#[derive(Clone, Debug, PartialEq)]
-pub struct Placement {
-    before: String,
-    after: String,
+/// Finds a dictation again in its field while the user edits it, by its
+/// own words. The cursor position can't be trusted everywhere (Ghostty
+/// reports it at the top of the screen), and terminal programs redraw
+/// boxes and wrap lines around what was typed.
+#[derive(Clone, Debug)]
+pub struct Tracker {
+    words: Vec<String>,
+    /// Words right before and after the dictation, once seen as inserted.
+    context: Option<(Vec<String>, Vec<String>)>,
 }
 
-/// Characters of surrounding text that pin a dictation down.
-const ANCHOR_CHARS: usize = 40;
+/// Neighbouring words that pin a dictation down.
+const CONTEXT_WORDS: usize = 2;
+/// How many words longer or shorter an edited dictation may be.
+const MAX_GROWTH: usize = 6;
 
-impl Placement {
-    /// From the field as it was when the dictation went in.
-    pub fn new(field: &crate::text::Surroundings) -> Placement {
-        let n = field.before.chars().count();
-        Placement {
-            before: field.before.chars().skip(n.saturating_sub(ANCHOR_CHARS)).collect(),
-            after: field.after.chars().take(ANCHOR_CHARS).collect(),
+/// Box-drawing and block characters terminal programs draw around text.
+fn decoration(c: char) -> bool {
+    matches!(c, '\u{2500}'..='\u{259F}' | '\u{25A0}'..='\u{25FF}')
+}
+
+/// The words of `text` as written, and their lowercase letters and digits
+/// (to compare); decorations and symbol-only tokens drop out.
+fn field_words(text: &str) -> Vec<(&str, String)> {
+    text.split(|c: char| c.is_whitespace() || decoration(c))
+        .filter_map(|raw| {
+            let core: String = raw
+                .trim_matches(|c: char| !c.is_alphanumeric())
+                .to_lowercase();
+            (!core.is_empty()).then_some((raw, core))
+        })
+        .collect()
+}
+
+impl Tracker {
+    pub fn new(inserted: &str) -> Tracker {
+        Tracker {
+            words: field_words(inserted).into_iter().map(|(_, c)| c).collect(),
+            context: None,
         }
     }
 
-    /// The dictation as it reads now in `text` (the field around the
-    /// cursor), or None once its surroundings are gone.
-    pub fn locate(&self, text: &str, inserted_len: usize) -> Option<String> {
-        let starts: Vec<usize> = if self.before.is_empty() {
+    /// The dictation as it reads now in `text` (the field's contents), or
+    /// None when it can't be found.
+    pub fn locate(&mut self, text: &str) -> Option<String> {
+        let words = field_words(text);
+        let cores: Vec<&str> = words.iter().map(|(_, c)| c.as_str()).collect();
+        let n = self.words.len();
+        if n == 0 || cores.is_empty() {
+            return None;
+        }
+        let join = |range: std::ops::Range<usize>| words[range].iter().map(|(raw, _)| *raw).collect::<Vec<_>>().join(" ");
+        let Some((before, after)) = &self.context else {
+            // First sighting: exactly as inserted. The last one (lowest on
+            // a terminal screen, the newest) if it appears more than once.
+            let pos = (0..=cores.len().saturating_sub(n)).rev().find(|&i| {
+                cores.len() >= i + n && cores[i..i + n].iter().zip(&self.words).all(|(a, b)| a == b)
+            })?;
+            let before = cores[pos.saturating_sub(CONTEXT_WORDS)..pos].iter().map(|s| s.to_string()).collect();
+            let after = cores[pos + n..(pos + n + CONTEXT_WORDS).min(cores.len())].iter().map(|s| s.to_string()).collect();
+            self.context = Some((before, after));
+            return Some(join(pos..pos + n));
+        };
+        // Later: whatever sits between the same neighbours.
+        let matches_at = |i: usize, ctx: &[String]| {
+            i + ctx.len() <= cores.len() && cores[i..i + ctx.len()].iter().zip(ctx).all(|(a, b)| *a == b.as_str())
+        };
+        let starts: Vec<usize> = if before.is_empty() {
             vec![0]
         } else {
-            text.match_indices(self.before.as_str()).map(|(i, m)| i + m.len()).collect()
+            (0..cores.len()).filter(|&i| matches_at(i, before)).map(|i| i + before.len()).collect()
         };
-        let best = starts
+        starts
             .into_iter()
             .filter_map(|start| {
-                let end = if self.after.is_empty() {
-                    text.len()
+                let end = if after.is_empty() {
+                    cores.len()
                 } else {
-                    start + text[start..].find(self.after.as_str())?
+                    (start..=(start + n + MAX_GROWTH).min(cores.len())).find(|&j| matches_at(j, after))?
                 };
-                Some((start, end))
+                (end > start && (end - start).abs_diff(n) <= MAX_GROWTH).then_some((start, end))
             })
-            // Several matches: the one closest in length to what went in.
-            .min_by_key(|(s, e)| (e - s).abs_diff(inserted_len))?;
-        let found = &text[best.0..best.1];
-        // Far longer than the dictation: the anchors matched elsewhere.
-        (found.len() <= inserted_len * 3 + 80).then(|| found.trim().to_string())
+            // Several: the one closest in length, then the newest.
+            .min_by_key(|&(start, end)| ((end - start).abs_diff(n), std::cmp::Reverse(start)))
+            .map(|(start, end)| join(start..end))
     }
 }
 
@@ -462,19 +503,22 @@ mod tests {
 
     #[test]
     fn finds_the_dictation_again_in_its_field() {
-        let field = crate::text::Surroundings {
-            before: "Notes: we deploy with ".into(),
-            selected: String::new(),
-            after: " every day.".into(),
-        };
-        let place = Placement::new(&field);
-        let now = "Notes: we deploy with Kubernetes now every day.";
-        assert_eq!(place.locate(now, "cooper netties".len()).as_deref(), Some("Kubernetes now"));
-        // Its surroundings were deleted: it's gone.
-        assert_eq!(place.locate("Something else entirely.", 14), None);
-        // At the end of an empty field: everything after the start.
-        let empty = Placement::new(&crate::text::Surroundings::default());
-        assert_eq!(empty.locate("Hello there", 11).as_deref(), Some("Hello there"));
+        let mut t = Tracker::new("We use cooper netties for this.");
+        // First sighting, inside a terminal program's box.
+        let screen = "│ > hello there │\n│ We use cooper netties │\n│ for this. │\n╰──────╯ ? for shortcuts";
+        assert_eq!(t.locate(screen).as_deref(), Some("We use cooper netties for this."));
+        // Edited and rewrapped: found between the same neighbours.
+        let screen = "│ > hello there │\n│ We use Kubernetes for │\n│ this. │\n╰──────╯ ? for shortcuts";
+        assert_eq!(t.locate(screen).as_deref(), Some("We use Kubernetes for this."));
+        // Gone (the message was sent).
+        assert_eq!(t.locate("│ > │\n╰──────╯ ? for shortcuts").as_deref(), None);
+        // Never seen as inserted: not found.
+        let mut t = Tracker::new("Something else");
+        assert_eq!(t.locate("Nothing like it here"), None);
+        // At the start of an empty field.
+        let mut t = Tracker::new("Hello there");
+        assert_eq!(t.locate("Hello there").as_deref(), Some("Hello there"));
+        assert_eq!(t.locate("Hello their").as_deref(), Some("Hello their"));
     }
 
     #[test]

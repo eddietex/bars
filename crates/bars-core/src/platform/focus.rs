@@ -31,6 +31,12 @@ pub struct Focus {
 }
 
 impl Focus {
+    /// A terminal has focus. Its "text field" is the screen, and the cursor
+    /// position it reports can't be trusted (Ghostty: always the top).
+    pub fn in_terminal(&self) -> bool {
+        self.app.as_deref().is_some_and(is_terminal)
+    }
+
     /// For logs: what was found, without any of the text.
     pub fn summary(&self) -> String {
         format!(
@@ -131,7 +137,7 @@ const TERMINALS: &[&str] = &[
     "qterminal", "blackbox", "cool-retro-term", "rio", "warp", "tabby",
 ];
 
-fn is_terminal(app: &str) -> bool {
+pub(super) fn is_terminal(app: &str) -> bool {
     if cfg!(target_os = "macos") {
         TERMINALS.contains(&app)
     } else {
