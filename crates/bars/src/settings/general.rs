@@ -5,7 +5,7 @@ use bars_core::config::{InsertMethod, OverlayMode, PasteKeys, ThemeMode};
 use bars_core::controller::Command;
 use bars_core::hotkey::{Activation, Mods};
 
-use super::SettingsView;
+use super::{Page, SettingsView};
 
 #[cfg(target_os = "macos")]
 const MODIFIER_ONLY_HINT: &str = "Works in every app. Modifier-only shortcuts like Fn or Ctrl + Cmd never type anything.";
@@ -81,7 +81,14 @@ impl SettingsView {
                         .when(!hotkeys_ok, |el| el.opacity(0.5))
                         .on_click({
                             let state = state.clone();
-                            move |_, _, cx| {
+                            // Without a running shortcut listener no keys would
+                            // ever arrive: show what to allow instead.
+                            let open_setup = cx.listener(|this, _: &ClickEvent, _, cx| this.go(Page::Setup, cx));
+                            move |ev, window, cx| {
+                                if !hotkeys_ok {
+                                    open_setup(ev, window, cx);
+                                    return;
+                                }
                                 state.update(cx, |s, cx| {
                                     if s.desktop_shortcut {
                                         s.send(Command::ConfigureShortcut);

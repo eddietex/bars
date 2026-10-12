@@ -61,4 +61,31 @@ if kill -0 "$app" 2>/dev/null; then echo "bars did not quit"; exit 1; fi
 
 echo "== log"
 cat smoke/bars.log
+
+echo "== record a new shortcut (Ctrl+Shift+K) and use it"
+swiftc -O scripts/smoke/post-keys.swift -o smoke/post-keys
+BARS_DEV_CAPTURE=1 RUST_LOG=info "$exe" > smoke/shortcut.out 2> smoke/shortcut.log &
+app=$!
+sleep 10
+smoke/post-keys ctrl+shift+40 150   # 40 = K
+sleep 2
+grep -q "shortcut set to Ctrl+Shift+K" smoke/shortcut.log \
+  || { echo "recording a new shortcut did not work"; cat smoke/shortcut.log; exit 1; }
+grep -q 'Ctrl+Shift+K' "$HOME/Library/Application Support/bars/config.toml" \
+  || { echo "the new shortcut was not saved"; exit 1; }
+smoke/post-keys ctrl+shift+40 1200   # hold to dictate
+sleep 2
+grep -q "dictation started" smoke/shortcut.log \
+  || { echo "the new shortcut did not start dictation"; cat smoke/shortcut.log; exit 1; }
+# Caps Lock on must not block the shortcut (macOS reports it as a modifier
+# change only when it toggles).
+smoke/post-keys capslock-on
+smoke/post-keys ctrl+shift+40 1200
+sleep 2
+[ "$(grep -c "dictation started" smoke/shortcut.log)" -ge 2 ] \
+  || { echo "the shortcut stopped working with Caps Lock on"; cat smoke/shortcut.log; exit 1; }
+smoke/post-keys capslock-off
+"$exe" --quit
+for _ in $(seq 30); do kill -0 "$app" 2>/dev/null || break; sleep 0.5; done
+cat smoke/shortcut.log
 echo "smoke test passed"

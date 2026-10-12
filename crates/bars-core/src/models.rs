@@ -193,6 +193,12 @@ pub fn download(model: &ModelInfo, cancel: Arc<AtomicBool>, progress: Progress) 
     std::fs::create_dir_all(&dir)?;
     let agent = ureq::Agent::config_builder()
         .user_agent(concat!("Bars/", env!("CARGO_PKG_VERSION")))
+        // The system's trusted certificates, not just Mozilla's bundled list.
+        .tls_config(
+            ureq::tls::TlsConfig::builder()
+                .root_certs(ureq::tls::RootCerts::PlatformVerifier)
+                .build(),
+        )
         .build()
         .new_agent();
 

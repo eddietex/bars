@@ -162,6 +162,10 @@ struct Controller {
     internal_rx: Receiver<Internal>,
     /// What the UI was last told about permissions.
     last_requirements: Vec<platform::requirements::Requirement>,
+    /// macOS: while the shortcut backend is down, whether access was granted
+    /// at the last check, and when that was.
+    hotkey_access: bool,
+    hotkey_access_checked: Instant,
 }
 
 impl Controller {
@@ -201,6 +205,8 @@ impl Controller {
             mic_testing: false,
             bound_trigger: None,
             last_requirements: Vec::new(),
+            hotkey_access: platform::hotkey_access_granted(),
+            hotkey_access_checked: Instant::now(),
         }
     }
 
@@ -230,7 +236,7 @@ impl Controller {
         }
 
         loop {
-            let deadline = [self.recognizer.deadline(), self.start_cue_at]
+            let deadline = [self.recognizer.deadline(), self.start_cue_at, self.hotkey_access_check_at()]
                 .into_iter()
                 .flatten()
                 .min();
@@ -272,7 +278,29 @@ impl Controller {
                     self.audio.cue(Cue::Start, self.cfg.audio.sound_volume);
                 }
             }
+            if self.hotkey_access_check_at().is_some_and(|t| now >= t) {
+                self.check_hotkey_access(now);
+            }
         }
+    }
+
+    /// macOS: when to next check whether shortcut access has been granted,
+    /// while the backend is down (it can't start without it).
+    fn hotkey_access_check_at(&self) -> Option<Instant> {
+        (cfg!(target_os = "macos") && !self.hotkeys.is_active())
+            .then(|| self.hotkey_access_checked + Duration::from_secs(2))
+    }
+
+    /// Starts the shortcut backend once access appears, wherever it was
+    /// granted (System Settings, not only the setup assistant).
+    fn check_hotkey_access(&mut self, now: Instant) {
+        self.hotkey_access_checked = now;
+        let granted = platform::hotkey_access_granted();
+        if granted && !self.hotkey_access {
+            log::info!("shortcut access granted; starting the shortcut listener");
+            self.refresh_permissions();
+        }
+        self.hotkey_access = granted;
     }
 
     fn permissions_context(&self) -> platform::requirements::Context {
@@ -384,6 +412,7 @@ impl Controller {
         self.audio.start(self.cfg.audio.device.clone(), self.cfg.audio.keep_warm);
         let _ = self.inserter.send(InsertJob::RememberTarget);
         self.recording_since = Some(Instant::now());
+        log::info!("dictation started");
         // Delay the start sound slightly: chords that turn out to be part of
         // another shortcut get cancelled within this window silently.
         self.start_cue_at = Some(Instant::now() + Duration::from_millis(160));
@@ -509,7 +538,8 @@ impl Controller {
                 self.capturing = on;
                 self.hotkeys.set_capture(on);
                 if on && !self.hotkeys.is_active() {
-                    self.notice(NoticeKind::Warning, "Keyboard access is needed to record a shortcut");
+                    let what = if cfg!(target_os = "macos") { "Accessibility access" } else { "Keyboard access" };
+                    self.notice(NoticeKind::Warning, format!("{what} is needed to record a shortcut"));
                 }
             }
             Command::ConfigureShortcut => self.hotkeys.configure(),
@@ -610,6 +640,7 @@ impl Controller {
             self.emit_hotkey_status();
             self.emit_permissions();
         } else if self.cfg.hotkey.chord != old.hotkey.chord {
+            log::info!("shortcut set to {}", self.cfg.hotkey.chord);
             self.hotkeys.set_chord(self.cfg.hotkey.chord.clone());
         }
         let cfg = &self.cfg;

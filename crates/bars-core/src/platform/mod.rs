@@ -128,6 +128,19 @@ pub fn fix_permissions(only: Option<requirements::ReqId>) -> anyhow::Result<()> 
     }
 }
 
+/// Whether a shortcut backend that couldn't start could start now. Cheap
+/// enough to poll: macOS grants access in System Settings, outside Bars.
+pub fn hotkey_access_granted() -> bool {
+    #[cfg(target_os = "macos")]
+    {
+        mac::permissions::accessibility() || mac::permissions::input_monitoring()
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        false
+    }
+}
+
 /// The active global-hotkey backend.
 pub enum Hotkeys {
     #[cfg(target_os = "linux")]

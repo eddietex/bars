@@ -21,7 +21,10 @@ regex = "1"
 once_cell = "1"
 cpal = { version = "0.18", features = ["pulseaudio"] }
 rubato = "5"
-ureq = { version = "3", default-features = false, features = ["rustls", "gzip"] }
+# platform-verifier: trust the OS certificate store (like browsers do), so
+# downloads work behind TLS-inspecting proxies and antivirus whose root
+# certificates are installed system-wide.
+ureq = { version = "3", default-features = false, features = ["rustls", "gzip", "platform-verifier"] }
 sha2 = "0.10"
 transcribe-rs = { version = "0.3.12", features = ["onnx"] }
 

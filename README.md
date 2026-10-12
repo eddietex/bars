@@ -160,4 +160,6 @@ dmgbuild the disk image with its background and icon layout.
 Dev helpers: `BARS_ONBOARDING=<welcome|microphone|access|model|try|done>`
 opens the assistant at a step; `BARS_DEV_NO_ACCESS=1` previews it as a user
 without keyboard access; `BARS_PAGE=<home|general|model|...>` opens settings
-at a page.
+at a page; `BARS_DEV_CAPTURE=1` starts recording a new shortcut at launch
+(used by the macOS smoke test, which presses keys with
+`scripts/smoke/post-keys.swift`).
