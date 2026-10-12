@@ -39,7 +39,20 @@ jobs:
     container:
       image: ghcr.io/flathub-infra/flatpak-github-actions:freedesktop-26.08
       options: --privileged
+      # The release build (LTO, whole GPUI stack) can fill the runner's disk.
+      # Steps run in this container, so preinstalled toolchains we don't use
+      # are mounted in to be deleted from the host.
+      volumes:
+        - /usr/share/dotnet:/host/dotnet
+        - /usr/local/lib/android:/host/android
+        - /opt/ghc:/host/ghc
+        - /opt/hostedtoolcache/CodeQL:/host/codeql
     steps:
+      - name: Free disk space
+        run: |
+          df -h /__w
+          rm -rf /host/dotnet/* /host/android/* /host/ghc/* /host/codeql/*
+          df -h /__w
       - uses: actions/checkout@v4
       - uses: flatpak/flatpak-github-actions/flatpak-builder@v6
         with:
