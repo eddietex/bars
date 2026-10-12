@@ -1,0 +1,39 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<component type="desktop-application">
+  <id>xyz.hink.Bars</id>
+  <name>Bars</name>
+  <summary>Private, on-device voice dictation for every app</summary>
+  <developer id="xyz.hink">
+    <name>Chris Hink</name>
+  </developer>
+  <metadata_license>CC0-1.0</metadata_license>
+  <project_license>MIT</project_license>
+  <description>
+    <p>
+      Hold a shortcut, speak, and let go: Bars transcribes your voice with a
+      fast local speech model and types the text into whatever app you are
+      using. Nothing is sent over the network.
+    </p>
+    <ul>
+      <li>Push-to-talk or hands-free dictation from a global shortcut</li>
+      <li>NVIDIA Parakeet and Canary models running on your CPU via ONNX Runtime</li>
+      <li>Removes filler words, supports a personal dictionary and snippets</li>
+      <li>Lives in the system tray with a minimal recording indicator</li>
+    </ul>
+  </description>
+  <launchable type="desktop-id">xyz.hink.Bars.desktop</launchable>
+  <icon type="stock">xyz.hink.Bars</icon>
+  <content_rating type="oars-1.1"/>
+  <supports>
+    <control>keyboard</control>
+    <control>pointing</control>
+  </supports>
+  <requires>
+    <internet>first-run</internet>
+  </requires>
+  <releases>
+    <release version="0.1.0" date="2026-10-11">
+      <description><p>First release.</p></description>
+    </release>
+  </releases>
+</component>

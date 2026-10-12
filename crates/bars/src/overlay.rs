@@ -1,0 +1,438 @@
+//! The floating recording pill. On Wayland compositors with layer-shell
+//! (KDE, wlroots, Hyprland, COSMIC...) it is an overlay surface that never
+//! takes keyboard focus, so text lands in the app you were using.
+
+use std::collections::VecDeque;
+use std::time::{Duration, Instant};
+
+use gpui_kit::prelude::FluentBuilder as _;
+use gpui_kit::*;
+use bars_core::controller::{Command, NoticeKind, Phase};
+
+use crate::state::{AppState, LevelMeter, StateEvent};
+use crate::theme::FONT;
+use crate::widgets::{h_row, icon};
+
+/// Surface size; the pill is drawn centred at its bottom and the input
+/// region is restricted to the pill so the rest is click-through.
+const SURFACE: Size<Pixels> = Size {
+    width: px(440.),
+    height: px(96.),
+};
+const PILL_H: f32 = 36.;
+const BARS: usize = 13;
+
+#[derive(Clone, Copy, PartialEq, Debug)]
+enum Visual {
+    Hidden,
+    Listening,
+    HandsFree,
+    Thinking,
+    Message,
+}
+
+pub struct Overlay {
+    state: Entity<AppState>,
+    levels: VecDeque<f32>,
+    last_sample: Instant,
+    visual: Visual,
+    changed_at: Instant,
+    from_width: f32,
+    message: Option<(SharedString, NoticeKind, Instant)>,
+    input_region: Option<Bounds<Pixels>>,
+    _subs: Vec<Subscription>,
+}
+
+impl Overlay {
+    pub fn new(state: Entity<AppState>, cx: &mut Context<Self>) -> Self {
+        let level = state.read(cx).level.clone();
+        let subs = vec![
+            cx.observe(&level, |this, level, cx| this.on_level(level, cx)),
+            cx.subscribe(&state, |this, state, ev: &StateEvent, cx| match ev {
+                StateEvent::PhaseChanged(_) => {
+                    this.sync(state.read(cx).phase);
+                    cx.notify();
+                }
+                StateEvent::Notice => {
+                    if let Some(n) = state.read(cx).notice.clone() {
+                        // Only surface short, glanceable notices here.
+                        if n.text.len() <= 64 {
+                            this.message = Some((n.text, n.kind, Instant::now()));
+                            this.set_visual(Visual::Message);
+                            cx.notify();
+                        }
+                    }
+                }
+                StateEvent::ThemeChanged => {}
+            }),
+        ];
+        let mut this = Overlay {
+            state: state.clone(),
+            levels: VecDeque::from(vec![0.0; BARS]),
+            last_sample: Instant::now(),
+            visual: Visual::Hidden,
+            changed_at: Instant::now(),
+            from_width: 0.0,
+            message: None,
+            input_region: None,
+            _subs: subs,
+        };
+        // A notice may be what caused this overlay to open.
+        if let Some(n) = state.read(cx).notice.clone() {
+            if n.at.elapsed() < Duration::from_millis(500) && n.text.len() <= 64 {
+                this.message = Some((n.text, n.kind, n.at));
+            }
+        }
+        this.sync(state.read(cx).phase);
+        this
+    }
+
+    fn set_visual(&mut self, v: Visual) {
+        if self.visual != v {
+            self.from_width = self.current_width();
+            self.visual = v;
+            self.changed_at = Instant::now();
+        }
+    }
+
+    fn sync(&mut self, phase: Phase) {
+        let v = match phase {
+            Phase::Idle => {
+                if self.message.as_ref().is_some_and(|m| m.2.elapsed() < Duration::from_millis(2600)) {
+                    Visual::Message
+                } else {
+                    Visual::Hidden
+                }
+            }
+            Phase::Recording { locked: false } => Visual::Listening,
+            Phase::Recording { locked: true } => Visual::HandsFree,
+            Phase::Transcribing => Visual::Thinking,
+        };
+        if v != Visual::Message {
+            self.message = None;
+        }
+        if matches!(v, Visual::Listening) && self.visual == Visual::Hidden {
+            self.levels.iter_mut().for_each(|l| *l = 0.0);
+        }
+        self.set_visual(v);
+    }
+
+    fn on_level(&mut self, level: Entity<LevelMeter>, cx: &mut Context<Self>) {
+        let l = level.read(cx).level;
+        // Scroll the waveform at ~30 Hz regardless of callback rate.
+        if self.last_sample.elapsed() >= Duration::from_millis(33) {
+            self.last_sample = Instant::now();
+            self.levels.pop_front();
+            self.levels.push_back(l);
+        } else if let Some(last) = self.levels.back_mut() {
+            *last = last.max(l);
+        }
+        if matches!(self.visual, Visual::Listening | Visual::HandsFree) {
+            cx.notify();
+        }
+    }
+
+    fn target_width(&self) -> f32 {
+        match self.visual {
+            Visual::Hidden => 44.,
+            Visual::Listening => 132.,
+            Visual::HandsFree => 196.,
+            Visual::Thinking => 92.,
+            Visual::Message => {
+                let len = self.message.as_ref().map_or(0, |m| m.0.len());
+                (len as f32 * 7.0 + 56.).clamp(160., 420.)
+            }
+        }
+    }
+
+    fn progress(&self) -> f32 {
+        let t = self.changed_at.elapsed().as_secs_f32() / 0.22;
+        // easeOutCubic
+        1.0 - (1.0 - t.min(1.0)).powi(3)
+    }
+
+    fn current_width(&self) -> f32 {
+        let to = self.target_width();
+        if self.from_width == 0.0 {
+            return to;
+        }
+        self.from_width + (to - self.from_width) * self.progress()
+    }
+
+    fn render_bars(&self, color: Option<Hsla>, t: f32) -> impl IntoElement {
+        let thinking = self.visual == Visual::Thinking;
+        h_row().gap(px(3.)).h(px(22.)).children((0..BARS).map(move |i| {
+            let h = if thinking {
+                // A soft travelling wave while the model works.
+                let phase = t * 7.0 - i as f32 * 0.55;
+                4.0 + (phase.sin() * 0.5 + 0.5).powf(2.0) * 9.0
+            } else {
+                let l = self.levels[i];
+                // Center bars a little taller: reads as a voice, not a meter.
+                let centre = 1.0 - ((i as f32 - (BARS as f32 - 1.0) / 2.0).abs() / BARS as f32);
+                3.0 + (l * (0.55 + 0.45 * centre)).min(1.0) * 19.0
+            };
+            let alpha = if thinking {
+                0.35 + 0.5 * ((t * 7.0 - i as f32 * 0.55).sin() * 0.5 + 0.5)
+            } else {
+                1.0
+            };
+            div().w(px(3.)).h(px(h)).rounded_full().bg(bar_fill(color, alpha))
+        }))
+    }
+}
+
+impl Render for Overlay {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let animating = self.changed_at.elapsed() < Duration::from_millis(260);
+        // Expire messages.
+        if self.visual == Visual::Message
+            && self.message.as_ref().is_none_or(|m| m.2.elapsed() > Duration::from_millis(2600))
+        {
+            self.message = None;
+            let phase = self.state.read(cx).phase;
+            self.sync(phase);
+        }
+        let t = self.changed_at.elapsed().as_secs_f32();
+        if animating || matches!(self.visual, Visual::Thinking | Visual::Message | Visual::HandsFree) {
+            window.request_animation_frame();
+        }
+
+        let visible = self.visual != Visual::Hidden;
+        let width = self.current_width();
+        let appear = if visible { self.progress() } else { 1.0 - self.progress() };
+
+        // Restrict input to the pill.
+        let pill_bounds = Bounds {
+            origin: point(
+                (SURFACE.width - px(width)) / 2.0,
+                SURFACE.height - px(PILL_H) - px(10.),
+            ),
+            size: size(px(width), px(PILL_H)),
+        };
+        let region = visible.then_some(pill_bounds);
+        if region != self.input_region {
+            self.input_region = region;
+            match region {
+                // Also shapes the compositor blur behind the pill.
+                Some(b) => window.set_input_region(Some(&capsule_rects(b))),
+                None => window.set_input_region(Some(&[])),
+            }
+        }
+
+        let white: Hsla = rgb(0xffffff).into();
+        let red: Hsla = rgb(0xff5a4e).into();
+        let state = self.state.clone();
+
+        let content: AnyElement = match self.visual {
+            Visual::Hidden => div().into_any_element(),
+            Visual::Listening => self.render_bars(None, t).into_any_element(),
+            Visual::Thinking => self.render_bars(None, t).into_any_element(),
+            Visual::HandsFree => {
+                let pulse = 0.55 + 0.45 * ((t * 3.2).sin() * 0.5 + 0.5);
+                let mut dot = red;
+                dot.a = pulse;
+                let s1 = state.clone();
+                let s2 = state.clone();
+                h_row()
+                    .w_full()
+                    .justify_between()
+                    .px(px(6.))
+                    .child(
+                        div()
+                            .id("cancel")
+                            .size(px(24.))
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .rounded_full()
+                            .cursor_pointer()
+                            .hover(|s| s.bg(hsla(0., 0., 1., 0.12)))
+                            .on_click(move |_, _, cx| s1.read(cx).send(Command::Cancel))
+                            .child(icon(gpui_kit::assets::IconName::X, hsla(0., 0., 1., 0.7), 13.)),
+                    )
+                    .child(
+                        h_row()
+                            .gap(px(8.))
+                            .child(div().size(px(7.)).rounded_full().bg(dot))
+                            .child(self.render_bars(None, t)),
+                    )
+                    .child(
+                        div()
+                            .id("stop")
+                            .size(px(24.))
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .rounded_full()
+                            .bg(red)
+                            .cursor_pointer()
+                            .hover(|s| s.opacity(0.85))
+                            .on_click(move |_, _, cx| s2.read(cx).send(Command::Finish))
+                            .child(div().size(px(8.)).rounded(px(2.)).bg(white)),
+                    )
+                    .into_any_element()
+            }
+            Visual::Message => {
+                let (text, kind) = self
+                    .message
+                    .as_ref()
+                    .map(|m| (m.0.clone(), m.1.clone()))
+                    .unwrap_or_default_kind();
+                let tint: Hsla = match kind {
+                    NoticeKind::Error => rgb(0xff8a8a).into(),
+                    NoticeKind::Warning => rgb(0xffcf7a).into(),
+                    NoticeKind::Info => hsla(0., 0., 1., 0.92),
+                };
+                div()
+                    .px(px(16.))
+                    .text_size(px(12.5))
+                    .font_weight(FontWeight::MEDIUM)
+                    .text_color(tint)
+                    .whitespace_nowrap()
+                    .child(text)
+                    .into_any_element()
+            }
+        };
+
+        let pill = div()
+            .id("pill")
+            .w(px(width))
+            .h(px(PILL_H))
+            .flex()
+            .items_center()
+            .justify_center()
+            .rounded_full()
+            // Frosted glass: translucent fill over the compositor's blur,
+            // a faint top highlight, and a hairline edge.
+            .bg(linear_gradient(
+                180.,
+                linear_color_stop(hsla(240. / 360., 0.10, 0.16, 0.62), 0.),
+                linear_color_stop(hsla(240. / 360., 0.10, 0.07, 0.58), 1.),
+            ))
+            .border_1()
+            .border_color(hsla(0., 0., 1., 0.14))
+            .shadow_md()
+            .opacity(appear)
+            .font_family(FONT)
+            .when(self.visual == Visual::Listening || self.visual == Visual::Thinking, |el| {
+                // Clicking a push-to-talk pill locks it into hands-free mode.
+                let s = state.clone();
+                el.cursor_pointer().on_click(move |_, _, cx| {
+                    if s.read(cx).phase == (Phase::Recording { locked: false }) {
+                        s.read(cx).send(Command::Toggle);
+                    }
+                })
+            })
+            .child(content);
+
+        div()
+            .size_full()
+            .flex()
+            .flex_col()
+            .justify_end()
+            .items_center()
+            .pb(px(10.))
+            .when(visible || animating, |el| el.child(pill))
+    }
+}
+
+/// `None` color = the brand gradient (magenta to blue, like the icon's bars).
+fn bar_fill(color: Option<Hsla>, alpha: f32) -> Background {
+    match color {
+        Some(mut c) => {
+            c.a *= alpha;
+            c.into()
+        }
+        None => {
+            let mut top: Hsla = rgb(crate::brand::GRADIENT_TOP).into();
+            let mut bottom: Hsla = rgb(crate::brand::GRADIENT_BOTTOM).into();
+            top.a = alpha;
+            bottom.a = alpha;
+            linear_gradient(180., linear_color_stop(top, 0.), linear_color_stop(bottom, 1.))
+        }
+    }
+}
+
+/// Approximates a capsule with horizontal strips, so regions (input, blur)
+/// follow the rounded ends instead of the bounding box.
+fn capsule_rects(b: Bounds<Pixels>) -> Vec<Bounds<Pixels>> {
+    let h = f32::from(b.size.height);
+    let w = f32::from(b.size.width);
+    let r = h / 2.0;
+    let strip: f32 = 2.0;
+    let mut rects = Vec::new();
+    let mut y = 0.0;
+    while y < h {
+        let sh = strip.min(h - y);
+        let dy = ((y + sh / 2.0) - r).abs();
+        let inset = (r - (r * r - dy * dy).max(0.0).sqrt()).ceil();
+        rects.push(Bounds {
+            origin: point(b.origin.x + px(inset), b.origin.y + px(y)),
+            size: size(px((w - 2.0 * inset).max(0.0)), px(sh)),
+        });
+        y += sh;
+    }
+    rects
+}
+
+trait MessageExt {
+    fn unwrap_or_default_kind(self) -> (SharedString, NoticeKind);
+}
+
+impl MessageExt for Option<(SharedString, NoticeKind)> {
+    fn unwrap_or_default_kind(self) -> (SharedString, NoticeKind) {
+        self.unwrap_or_else(|| (SharedString::default(), NoticeKind::Info))
+    }
+}
+
+/// Creates the overlay window. Prefers a layer-shell surface; falls back to
+/// an unfocused popup where layer-shell isn't available (e.g. GNOME).
+pub fn open(state: Entity<AppState>, cx: &mut App) -> Option<WindowHandle<Overlay>> {
+    let bounds = Bounds {
+        origin: point(px(0.), px(0.)),
+        size: SURFACE,
+    };
+    #[cfg(target_os = "linux")]
+    {
+        let opts = WindowOptions {
+            titlebar: None,
+            kind: WindowKind::LayerShell(layer_shell::LayerShellOptions {
+                namespace: "bars-overlay".into(),
+                layer: layer_shell::Layer::Overlay,
+                anchor: layer_shell::Anchor::BOTTOM,
+                margin: Some((px(0.), px(0.), px(28.), px(0.))),
+                keyboard_interactivity: layer_shell::KeyboardInteractivity::None,
+                ..Default::default()
+            }),
+            window_bounds: Some(WindowBounds::Windowed(bounds)),
+            // Blurred = transparent + KDE blur (where supported), confined
+            // to the pill by the input region.
+            window_background: WindowBackgroundAppearance::Blurred,
+            focus: false,
+            show: true,
+            is_movable: false,
+            is_resizable: false,
+            app_id: Some(bars_core::paths::APP_ID.into()),
+            ..Default::default()
+        };
+        let s = state.clone();
+        match cx.open_window(opts, |_, cx| cx.new(|cx| Overlay::new(s, cx))) {
+            Ok(h) => return Some(h),
+            Err(e) => log::info!("layer-shell overlay unavailable ({e}); using a popup"),
+        }
+    }
+    let opts = WindowOptions {
+        titlebar: None,
+        kind: WindowKind::PopUp,
+        window_bounds: Some(WindowBounds::Windowed(Bounds::centered(None, SURFACE, cx))),
+        window_background: WindowBackgroundAppearance::Transparent,
+        focus: false,
+        show: true,
+        is_movable: false,
+        is_resizable: false,
+        app_id: Some(bars_core::paths::APP_ID.into()),
+        ..Default::default()
+    };
+    cx.open_window(opts, |_, cx| cx.new(|cx| Overlay::new(state, cx))).ok()
+}

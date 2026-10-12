@@ -1,0 +1,113 @@
+name: Release
+
+# Push a tag like v0.2.0 to build every platform and open a draft release.
+# Run manually (Actions > Release > Run workflow) to just build artifacts.
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  flatpak:
+    name: Linux (Flatpak)
+    runs-on: ubuntu-24.04
+    container:
+      image: ghcr.io/flathub-infra/flatpak-github-actions:freedesktop-26.08
+      options: --privileged
+    steps:
+      - uses: actions/checkout@v4
+      - uses: flatpak/flatpak-github-actions/flatpak-builder@v6
+        with:
+          manifest-path: packaging/flatpak/xyz.hink.Bars.yml
+          bundle: bars-x86_64.flatpak
+          cache-key: flatpak-builder-${{ github.sha }}
+          upload-artifact: false
+      - uses: actions/upload-artifact@v4
+        with:
+          name: linux-flatpak
+          path: bars-x86_64.flatpak
+
+  linux-tarball:
+    name: Linux (tarball)
+    # Older glibc so the binary runs on more distros.
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: System dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            pkg-config clang libasound2-dev libfontconfig-dev libfreetype-dev \
+            libwayland-dev libxkbcommon-dev libxkbcommon-x11-dev libx11-xcb-dev \
+            libxcb1-dev libvulkan-dev libssl-dev libzstd-dev
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo build --release -p bars --locked
+      - name: Package
+        run: |
+          dir=bars-linux-x86_64
+          mkdir -p $dir/share/applications $dir/share/metainfo $dir/udev
+          install -Dm755 target/release/bars $dir/bin/bars
+          cp packaging/linux/xyz.hink.Bars.desktop $dir/share/applications/
+          cp packaging/linux/xyz.hink.Bars.metainfo.xml $dir/share/metainfo/
+          cp -r packaging/linux/icons $dir/share/icons
+          cp packaging/linux/70-bars.rules $dir/udev/
+          cp README.md LICENSE $dir/
+          tar czf bars-linux-x86_64.tar.gz $dir
+      - uses: actions/upload-artifact@v4
+        with:
+          name: linux-tarball
+          path: bars-linux-x86_64.tar.gz
+
+  windows:
+    name: Windows (installer)
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo install cargo-packager --locked --version 0.11.8
+      - run: cargo build --release -p bars --locked
+      - run: cargo packager --release -p bars --formats nsis
+      - uses: actions/upload-artifact@v4
+        with:
+          name: windows
+          path: dist/*.exe
+
+  macos:
+    name: macOS (Apple Silicon)
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo install cargo-packager --locked --version 0.11.8
+      - run: cargo build --release -p bars --locked
+      # Unsigned for now: add a Developer ID + notarization secrets to sign.
+      - run: cargo packager --release -p bars --formats dmg
+      - uses: actions/upload-artifact@v4
+        with:
+          name: macos
+          path: dist/*.dmg
+
+  release:
+    name: Draft release
+    needs: [flatpak, linux-tarball, windows, macos]
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+          merge-multiple: true
+      - uses: softprops/action-gh-release@v2
+        with:
+          draft: true
+          generate_release_notes: true
+          files: artifacts/*

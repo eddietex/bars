@@ -1,0 +1,59 @@
+# Local build:  ./scripts/build-flatpak.sh
+#
+# This manifest builds from the working tree and lets cargo/ort fetch their
+# dependencies (build-args --share=network). For Flathub, vendor crates with
+# flatpak-cargo-generator and add the ONNX Runtime archive as a source.
+id: xyz.hink.Bars
+runtime: org.freedesktop.Platform
+runtime-version: '26.08'
+sdk: org.freedesktop.Sdk
+sdk-extensions:
+  - org.freedesktop.Sdk.Extension.rust-stable
+command: bars
+finish-args:
+  # Display: GPUI renders with Vulkan on Wayland (X11 as fallback).
+  - --socket=wayland
+  - --socket=fallback-x11
+  - --share=ipc
+  # /dev/dri for rendering, plus /dev/input and /dev/uinput for the direct
+  # hotkey and virtual-keyboard backends. Access to those is still governed by
+  # the host's udev ACLs; without them Bars falls back to desktop portals.
+  - --device=all
+  # Microphone and sound cues.
+  - --socket=pulseaudio
+  # Model downloads (first run only).
+  - --share=network
+  # System tray (StatusNotifierItem).
+  - --talk-name=org.kde.StatusNotifierWatcher
+  # Lets the setup assistant run the one-time keyboard-access setup through
+  # the host's polkit prompt ("Allow access"). Without it the assistant shows
+  # a command to paste instead. Drop this for Flathub.
+  - --talk-name=org.freedesktop.Flatpak
+build-options:
+  append-path: /usr/lib/sdk/rust-stable/bin
+  env:
+    CARGO_HOME: /run/build/bars/cargo
+    CARGO_TERM_COLOR: never
+  build-args:
+    - --share=network
+modules:
+  - name: bars
+    buildsystem: simple
+    build-commands:
+      - cargo build --release --locked -p bars
+      - install -Dm755 target/release/bars /app/bin/bars
+      - install -Dm644 packaging/linux/xyz.hink.Bars.desktop /app/share/applications/xyz.hink.Bars.desktop
+      - install -Dm644 packaging/linux/xyz.hink.Bars.metainfo.xml /app/share/metainfo/xyz.hink.Bars.metainfo.xml
+      - |
+        for size in 32 48 64 128 256 512; do
+          install -Dm644 packaging/linux/icons/${size}x${size}/xyz.hink.Bars.png \
+            /app/share/icons/hicolor/${size}x${size}/apps/xyz.hink.Bars.png
+        done
+    sources:
+      - type: dir
+        path: ../..
+        skip:
+          - target
+          - .flatpak-builder
+          - build-dir
+          - repo

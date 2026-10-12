@@ -1,0 +1,4 @@
+# Bars voice dictation: let the active seat user observe keyboards (global
+# push-to-talk hotkey) and create a virtual keyboard (to type transcripts).
+KERNEL=="uinput", SUBSYSTEM=="misc", TAG+="uaccess", OPTIONS+="static_node=uinput"
+SUBSYSTEM=="input", KERNEL=="event*", ENV{ID_INPUT_KEYBOARD}=="1", TAG+="uaccess"

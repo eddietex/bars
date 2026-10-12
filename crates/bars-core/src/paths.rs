@@ -1,0 +1,44 @@
+//! Filesystem locations. Inside Flatpak these resolve to `~/.var/app/<id>/...`
+//! automatically because the sandbox rewrites the XDG variables.
+
+use std::path::PathBuf;
+
+pub const APP_ID: &str = "xyz.hink.Bars";
+pub const APP_DIR: &str = "bars";
+
+fn ensure(dir: PathBuf) -> PathBuf {
+    let _ = std::fs::create_dir_all(&dir);
+    dir
+}
+
+pub fn config_dir() -> PathBuf {
+    ensure(
+        dirs::config_dir()
+            .unwrap_or_else(|| PathBuf::from("."))
+            .join(APP_DIR),
+    )
+}
+
+pub fn data_dir() -> PathBuf {
+    ensure(
+        dirs::data_dir()
+            .unwrap_or_else(|| PathBuf::from("."))
+            .join(APP_DIR),
+    )
+}
+
+pub fn models_dir() -> PathBuf {
+    ensure(data_dir().join("models"))
+}
+
+pub fn config_file() -> PathBuf {
+    config_dir().join("config.toml")
+}
+
+pub fn history_file() -> PathBuf {
+    data_dir().join("history.jsonl")
+}
+
+pub fn is_flatpak() -> bool {
+    std::path::Path::new("/.flatpak-info").exists()
+}

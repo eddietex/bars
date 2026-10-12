@@ -1,0 +1,104 @@
+--- gpui-pre-linux-0.3.8/src/linux/wayland/window.rs	2006-07-23 20:21:28.000000000 -0500
++++ gpui-pre-linux/src/linux/wayland/window.rs	2026-10-11 19:51:37.618655962 -0500
+@@ -754,6 +754,26 @@
+ }
+ 
+ pub(crate) struct WaylandWindow(pub WaylandWindowStatePtr);
++
++fn schedule_frame_loop(
++    frame_loop: &Cell<FrameLoop>,
++    frame_ping: &Ping,
++    scheduled_frame_at: &Cell<Option<Instant>>,
++) {
++    match frame_loop.get() {
++        FrameLoop::Parked => {
++            frame_loop.set(FrameLoop::Scheduled);
++            scheduled_frame_at.set(PlatformFrameSignal::capture(Instant::now));
++            frame_ping.ping();
++        }
++        FrameLoop::Ticking => {
++            frame_loop.set(FrameLoop::RescheduleRequested);
++        }
++        // A wake is already armed: a ping or retry timer is in flight, or a
++        // presented buffer guarantees a compositor frame callback.
++        _ => {}
++    }
++}
+ pub enum ImeInput {
+     InsertText(String),
+     SetMarkedText(String),
+@@ -1032,20 +1052,16 @@
+     }
+ 
+     pub fn schedule_frame(&self) {
+-        match self.frame_loop.get() {
+-            FrameLoop::Parked => {
+-                self.frame_loop.set(FrameLoop::Scheduled);
+-                self.scheduled_frame_at
+-                    .set(PlatformFrameSignal::capture(Instant::now));
+-                self.frame_ping.ping();
+-            }
+-            FrameLoop::Ticking => {
+-                self.frame_loop.set(FrameLoop::RescheduleRequested);
+-            }
+-            // A wake is already armed: a ping or retry timer is in flight, or a
+-            // presented buffer guarantees a compositor frame callback.
+-            _ => {}
+-        }
++        schedule_frame_loop(&self.frame_loop, &self.frame_ping, &self.scheduled_frame_at);
++    }
++
++    /// A waker GPUI calls when the window becomes dirty, so a parked frame loop
++    /// restarts after state changes that don't come from input (bars patch).
++    fn frame_waker(&self) -> Rc<dyn Fn()> {
++        let frame_loop = self.frame_loop.clone();
++        let frame_ping = self.frame_ping.clone();
++        let scheduled_frame_at = self.scheduled_frame_at.clone();
++        Rc::new(move || schedule_frame_loop(&frame_loop, &frame_ping, &scheduled_frame_at))
+     }
+ 
+     fn request_redraw(&self) {
+@@ -2010,6 +2026,10 @@
+         self.0.schedule_frame();
+     }
+ 
++    fn frame_waker(&self) -> Option<Rc<dyn Fn()>> {
++        Some(self.0.frame_waker())
++    }
++
+     fn sprite_atlas(&self) -> Arc<dyn PlatformAtlas> {
+         self.borrow()
+             .renderer
+@@ -2107,6 +2127,32 @@
+             }
+         }
+ 
++        // Blurred windows confine the blur to the input region (bars patch),
++        // so a shaped overlay doesn't get a frosted rectangle behind it.
++        if let Some(blur) = &state.blur {
++            match region {
++                None => blur.set_region(None),
++                Some(rects) => {
++                    let blur_region = state
++                        .globals
++                        .compositor
++                        .create_region(&state.globals.qh, ());
++                    for rect in rects {
++                        let rect = rect.map(|pixels| f32::from(pixels) as i32);
++                        blur_region.add(
++                            rect.origin.x,
++                            rect.origin.y,
++                            rect.size.width,
++                            rect.size.height,
++                        );
++                    }
++                    blur.set_region(Some(&blur_region));
++                    blur_region.destroy();
++                }
++            }
++            blur.commit();
++        }
++
+         // Commit so the new input region applies immediately. Otherwise it
+         // waits for the next frame, which could be the very click we want to
+         // allow passing through.

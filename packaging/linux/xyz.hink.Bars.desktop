@@ -1,0 +1,18 @@
+[Desktop Entry]
+Type=Application
+Name=Bars
+GenericName=Voice Dictation
+Comment=Talk instead of typing, in every app. Private and on-device.
+Exec=bars
+Icon=xyz.hink.Bars
+Terminal=false
+Categories=Utility;Accessibility;
+Keywords=dictation;voice;speech;speech-to-text;transcription;typing;
+StartupNotify=false
+StartupWMClass=xyz.hink.Bars
+SingleMainWindow=true
+Actions=toggle;
+
+[Desktop Action toggle]
+Name=Start or stop dictation
+Exec=bars --toggle

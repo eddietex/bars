@@ -1,0 +1,47 @@
+[package]
+name = "bars"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Local, private voice dictation for every app."
+
+[dependencies]
+bars-core = { path = "../bars-core" }
+gpui-kit = "0.7.1"
+anyhow = "1"
+log = "0.4"
+env_logger = { version = "0.11", default-features = false, features = ["auto-color", "humantime"] }
+async-channel = "2"
+chrono = "0.4"
+parking_lot = "0.12"
+smol = "2"
+image = { version = "0.25", default-features = false, features = ["png"] }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+ksni = { version = "0.3", default-features = false, features = ["blocking", "async-io"] }
+zbus = { version = "5", default-features = false, features = ["async-io", "blocking-api"] }
+ashpd = { version = "0.13", default-features = false, features = ["async-io", "background"] }
+
+# Windows/macOS installers: `cargo packager --release -p bars --formats nsis`
+# (or `app,dmg`). See .github/workflows/release.yml.
+[package.metadata.packager]
+product-name = "Bars"
+identifier = "xyz.hink.Bars"
+description = "Private, on-device voice dictation for every app"
+authors = ["Chris Hink"]
+publisher = "Chris Hink"
+category = "Productivity"
+license-file = "../../LICENSE"
+out-dir = "../../dist"
+binaries-dir = "../../target/release"
+binaries = [{ path = "bars", main = true }]
+icons = [
+    "../../packaging/linux/icons/32x32/xyz.hink.Bars.png",
+    "../../packaging/linux/icons/128x128/xyz.hink.Bars.png",
+    "../../packaging/linux/icons/256x256/xyz.hink.Bars.png",
+    "../../packaging/linux/icons/512x512/xyz.hink.Bars.png",
+]
+
+[package.metadata.packager.macos]
+minimum-system-version = "12.0"
+info-plist-path = "../../packaging/macos/Info.plist"

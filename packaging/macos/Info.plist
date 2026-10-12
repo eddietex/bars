@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <!-- Shown in macOS's microphone permission prompt. -->
+    <key>NSMicrophoneUsageDescription</key>
+    <string>Bars listens while you hold your dictation shortcut and transcribes your speech on this Mac.</string>
+    <key>NSHighResolutionCapable</key>
+    <true/>
+</dict>
+</plist>

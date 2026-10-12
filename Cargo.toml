@@ -1,0 +1,24 @@
+[workspace]
+resolver = "3"
+members = ["crates/bars-core", "crates/bars"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+license = "MIT"
+authors = ["Chris Hink <chris@hink.xyz>"]
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
+opt-level = 3
+strip = true
+
+[profile.dev.package."*"]
+opt-level = 2
+
+# Local fix: GPUI's Wayland windows never received a frame waker, so views
+# updated from background events (not input) didn't repaint until the next
+# input event. Remove once upstream gpui-pre implements `frame_waker`.
+[patch.crates-io]
+gpui-pre-linux = { path = "third_party/gpui-pre-linux" }
