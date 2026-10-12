@@ -15,7 +15,7 @@ use crossbeam_channel::{Receiver, Sender, bounded};
 
 use crate::text::{Agent, Surroundings};
 
-/// Characters read on each side of the cursor.
+/// Characters read on each side of the cursor for smart spacing.
 pub const CONTEXT_CHARS: usize = 240;
 
 #[derive(Clone, Debug, Default)]
@@ -45,21 +45,21 @@ impl Focus {
     }
 }
 
-type Job = (bool, Sender<Focus>);
+type Job = (Option<usize>, Sender<Focus>);
 
-/// Starts reading what's focused (`read_field`: also the text around the
-/// cursor). Captures run one at a time on a long-lived worker, so one
-/// stuck inside a hung app only makes later captures come back empty; it
-/// never blocks the caller.
-pub fn start_capture(read_field: bool) -> Receiver<Focus> {
+/// Starts reading what's focused, and with `field_chars` that many
+/// characters of the field on each side of the cursor. Captures run one at
+/// a time on a long-lived worker, so one stuck inside a hung app only makes
+/// later captures come back empty; it never blocks the caller.
+pub fn start_capture(field_chars: Option<usize>) -> Receiver<Focus> {
     static WORKER: OnceLock<Option<Sender<Job>>> = OnceLock::new();
     let worker = WORKER.get_or_init(|| {
         let (tx, rx) = bounded::<Job>(1);
         thread::Builder::new()
             .name("bars-focus".into())
             .spawn(move || {
-                for (read_field, reply) in rx {
-                    let mut focus = read_focus(read_field);
+                for (field_chars, reply) in rx {
+                    let mut focus = read_focus(field_chars);
                     focus.agent = coding_agent(&focus);
                     log::debug!("focus: {}", focus.summary());
                     let _ = reply.send(focus);
@@ -70,7 +70,7 @@ pub fn start_capture(read_field: bool) -> Receiver<Focus> {
     });
     let (tx, rx) = bounded(1);
     match worker {
-        Some(w) if w.try_send((read_field, tx.clone())).is_ok() => {}
+        Some(w) if w.try_send((field_chars, tx.clone())).is_ok() => {}
         _ => {
             log::debug!("focus: the previous capture is still running");
             let _ = tx.send(Focus::default());
@@ -80,26 +80,26 @@ pub fn start_capture(read_field: bool) -> Receiver<Focus> {
 }
 
 /// Reads what's focused, giving up after `timeout`.
-pub fn capture(read_field: bool, timeout: Duration) -> Focus {
-    start_capture(read_field).recv_timeout(timeout).unwrap_or_default()
+pub fn capture(field_chars: Option<usize>, timeout: Duration) -> Focus {
+    start_capture(field_chars).recv_timeout(timeout).unwrap_or_default()
 }
 
-fn read_focus(read_field: bool) -> Focus {
+fn read_focus(field_chars: Option<usize>) -> Focus {
     #[cfg(target_os = "macos")]
     {
-        super::mac::ax::read_focus(read_field)
+        super::mac::ax::read_focus(field_chars)
     }
     #[cfg(target_os = "windows")]
     {
-        super::win::uia::read_focus(read_field)
+        super::win::uia::read_focus(field_chars)
     }
     #[cfg(target_os = "linux")]
     {
-        super::linux::atspi::read_focus(read_field)
+        super::linux::atspi::read_focus(field_chars)
     }
     #[cfg(not(any(target_os = "macos", target_os = "windows", target_os = "linux")))]
     {
-        let _ = read_field;
+        let _ = field_chars;
         Focus::default()
     }
 }

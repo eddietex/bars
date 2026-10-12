@@ -14,7 +14,7 @@ use windows::Win32::UI::Accessibility::{
 use windows::Win32::UI::WindowsAndMessaging::{GetForegroundWindow, GetWindowTextW, GetWindowThreadProcessId};
 use windows::core::{Interface, PWSTR};
 
-use crate::platform::focus::{CONTEXT_CHARS, Focus};
+use crate::platform::focus::Focus;
 use crate::text::Surroundings;
 
 /// Milliseconds a call into another app may take.
@@ -40,7 +40,7 @@ fn automation() -> Option<IUIAutomation> {
     })
 }
 
-fn field_text() -> windows::core::Result<Option<Surroundings>> {
+fn field_text(chars: usize) -> windows::core::Result<Option<Surroundings>> {
     let Some(uia) = automation() else { return Ok(None) };
     unsafe {
         let el = uia.GetFocusedElement()?;
@@ -53,7 +53,7 @@ fn field_text() -> windows::core::Result<Option<Surroundings>> {
             return Ok(None);
         }
         let range = selection.GetElement(0)?;
-        let n = CONTEXT_CHARS as i32;
+        let n = chars as i32;
         // From n characters back up to the selection, and from the
         // selection n characters on.
         let before = range.Clone()?;
@@ -93,7 +93,7 @@ fn window_title(hwnd: HWND) -> Option<String> {
     (len > 0).then(|| String::from_utf16_lossy(&buf[..len as usize]))
 }
 
-pub fn read_focus(read_field: bool) -> Focus {
+pub fn read_focus(field_chars: Option<usize>) -> Focus {
     let hwnd = unsafe { GetForegroundWindow() };
     if hwnd.0.is_null() {
         return Focus::default();
@@ -104,7 +104,7 @@ pub fn read_focus(read_field: bool) -> Focus {
         app: (pid != 0).then(|| exe_name(pid)).flatten(),
         pid: (pid != 0).then_some(pid),
         window_title: window_title(hwnd),
-        field: if read_field { field_text().ok().flatten() } else { None },
+        field: field_chars.and_then(|n| field_text(n).ok().flatten()),
         agent: None,
     }
 }

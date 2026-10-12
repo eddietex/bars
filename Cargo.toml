@@ -22,3 +22,6 @@ opt-level = 2
 # input event. Remove once upstream gpui-pre implements `frame_waker`.
 [patch.crates-io]
 gpui-pre-linux = { path = "third_party/gpui-pre-linux" }
+# Parakeet also reports how sure it was of each token, and its vocabulary,
+# for learning from corrections. See third_party/transcribe-rs-parakeet.patch.
+transcribe-rs = { path = "third_party/transcribe-rs" }

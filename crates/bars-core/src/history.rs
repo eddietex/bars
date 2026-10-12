@@ -78,6 +78,16 @@ impl History {
         writeln!(f, "{}", serde_json::to_string(entry)?)
     }
 
+    /// Replaces an entry's text (the user corrected it). Returns the old
+    /// text.
+    pub fn update(&mut self, id: u64, text: &str) -> Option<String> {
+        let e = self.entries.iter_mut().find(|e| e.id == id)?;
+        let old = std::mem::replace(&mut e.text, text.to_string());
+        e.words = text.split_whitespace().count();
+        self.rewrite();
+        Some(old)
+    }
+
     pub fn delete(&mut self, id: u64) {
         self.entries.retain(|e| e.id != id);
         self.rewrite();

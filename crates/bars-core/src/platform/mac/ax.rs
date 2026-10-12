@@ -12,7 +12,7 @@ use core_foundation::string::{CFString, CFStringRef};
 use objc2_app_kit::NSRunningApplication;
 use parking_lot::Mutex;
 
-use crate::platform::focus::{CONTEXT_CHARS, Focus};
+use crate::platform::focus::Focus;
 use crate::text::Surroundings;
 
 #[link(name = "ApplicationServices", kind = "framework")]
@@ -164,14 +164,14 @@ fn utf16_slice(units: &[u16], start: i64, end: i64) -> String {
     String::from_utf16_lossy(&units[start..end.max(start)])
 }
 
-fn surroundings(field: &Element) -> Option<Surroundings> {
+fn surroundings(field: &Element, chars: usize) -> Option<Surroundings> {
     let role = field.string("AXRole");
     let subrole = field.string("AXSubrole");
     if [role.as_deref(), subrole.as_deref()].contains(&Some("AXSecureTextField")) {
         return None;
     }
     let (location, length) = field.range("AXSelectedTextRange")?;
-    let (end, n) = (location + length, CONTEXT_CHARS as i64);
+    let (end, n) = (location + length, chars as i64);
     let count = field.int("AXNumberOfCharacters");
     if count.is_some_and(|c| c <= READ_WHOLE_UP_TO) {
         if let Some(value) = field.string("AXValue") {
@@ -192,7 +192,7 @@ fn surroundings(field: &Element) -> Option<Surroundings> {
     })
 }
 
-pub fn read_focus(read_field: bool) -> Focus {
+pub fn read_focus(field_chars: Option<usize>) -> Focus {
     let Some(system) = Element::system_wide() else { return Focus::default() };
     let Some(app) = system.element("AXFocusedApplication") else { return Focus::default() };
     let pid = app.pid();
@@ -202,11 +202,7 @@ pub fn read_focus(read_field: bool) -> Focus {
         expose_accessibility(&app, pid, bundle.as_deref());
     }
     let window_title = app.element("AXFocusedWindow").and_then(|w| w.string("AXTitle"));
-    let field = if read_field {
-        app.element("AXFocusedUIElement").and_then(|f| surroundings(&f))
-    } else {
-        None
-    };
+    let field = field_chars.and_then(|n| app.element("AXFocusedUIElement").and_then(|f| surroundings(&f, n)));
     Focus {
         app: bundle,
         pid: pid.map(|p| p as u32),

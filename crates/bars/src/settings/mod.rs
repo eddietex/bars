@@ -8,7 +8,7 @@ mod model;
 mod setup;
 
 use gpui_kit::assets::IconName as I;
-use gpui_kit::component::input::InputState;
+use gpui_kit::component::input::{InputState, TextareaState};
 use gpui_kit::component::TitleBar;
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
@@ -80,6 +80,8 @@ pub struct SettingsView {
     // Setup page practice field.
     pub practice: Entity<InputState>,
     pub copied: Option<u64>,
+    /// A History entry being corrected, and its editor.
+    pub editing: Option<(u64, Entity<TextareaState>)>,
     _subs: Vec<Subscription>,
 }
 
@@ -108,6 +110,7 @@ impl SettingsView {
             state,
             page,
             copied: None,
+            editing: None,
             _subs: subs,
         }
     }

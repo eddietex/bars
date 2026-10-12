@@ -35,6 +35,13 @@ no text box had focus, the pill says so and offers the text to copy. Pasted
 text is kept out of clipboard-history apps, and everything you had copied
 (images and files too) comes back afterwards.
 
+With a Parakeet model, Bars learns from your corrections: fix a word it got
+wrong, in the app you dictated into or on the History page, and it adds the
+fix to your dictionary (the pill offers Undo). It only learns fixes of words
+the model was unsure of that look or sound like what it wrote, never
+rewordings or everyday words; less clear ones wait under Suggestions on the
+Dictionary page until they're seen again. Only the word pairs are kept.
+
 ## Speech models
 
 All models run locally on the CPU (int8 ONNX). Measured on an 11 s clip:
@@ -148,6 +155,7 @@ crates/bars-core   engine, audio, hotkeys, text injection, config, history
   src/engine.rs       model worker thread (transcribe-rs / ONNX Runtime)
   src/audio.rs        cpal capture (PulseAudio/PipeWire), resampling, cues
   src/text.rs         filler removal, dictionary, snippets, voice commands
+  src/learn.rs        learning dictionary words from corrections (tested)
   src/platform/       OS backends: linux/ (evdev, uinput, portals, data-control
                       clipboard, AT-SPI), win/ (keyboard hook, clipboard, UI
                       Automation), mac/ (event tap, pasteboard, accessibility,
@@ -157,7 +165,9 @@ crates/bars-core   engine, audio, hotkeys, text injection, config, history
 crates/bars        GPUI app: tray, overlay pill, settings window
   src/overlay_native.rs  Windows/macOS pill: click-through, active screen, blur (macOS)
   src/ipc_*.rs          single instance + CLI (D-Bus on Linux, local socket elsewhere)
-third_party/        gpui-pre-linux with a Wayland frame-waker fix (see patch)
+third_party/        gpui-pre-linux with a Wayland frame-waker fix, and
+                    transcribe-rs reporting Parakeet's token confidences
+                    (see the .patch files)
 packaging/          .desktop, AppStream, icons (from artwork/), udev rule, Flatpak manifest, macOS Info.plist
 scripts/smoke/      Windows/macOS runtime smoke tests run by CI
 ```

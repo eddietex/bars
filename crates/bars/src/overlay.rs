@@ -36,8 +36,8 @@ const BARS: usize = 13;
 const MESSAGE_FOR: Duration = Duration::from_millis(2600);
 /// "Select a text box first" stays longer: it offers the text to copy.
 pub const PASTE_FAILED_FOR: Duration = Duration::from_millis(6000);
-/// Room for the Copy button.
-const COPY_BUTTON_W: f32 = 64.;
+/// Room for the message's button (Copy, Undo).
+const ACTION_BUTTON_W: f32 = 64.;
 
 #[derive(Clone, Copy, PartialEq, Debug)]
 enum Visual {
@@ -58,8 +58,8 @@ pub struct Overlay {
     message: Option<(SharedString, NoticeKind, Instant)>,
     /// How long the current message stays.
     message_for: Duration,
-    /// Text the message offers to copy (a paste that landed nowhere).
-    copy_text: Option<SharedString>,
+    /// What the message's button does, and its label.
+    action: Option<(SharedString, Command)>,
     input_region: Option<Bounds<Pixels>>,
     /// Moved to the active screen for the current appearance.
     #[cfg(not(target_os = "linux"))]
@@ -90,8 +90,16 @@ impl Overlay {
                 }
                 StateEvent::PasteFailed => {
                     if let Some(text) = state.read(cx).paste_failed.clone() {
-                        let copy = Some(SharedString::from(text));
+                        let copy = Some(("Copy".into(), Command::CopyText(text)));
                         this.show_message("Select a text box first".into(), NoticeKind::Warning, PASTE_FAILED_FOR, copy);
+                        cx.notify();
+                    }
+                }
+                StateEvent::Learned => {
+                    if let Some((from, to)) = state.read(cx).learned.clone() {
+                        let label = format!("Learned “{to}”");
+                        let undo = Some(("Undo".into(), Command::UndoLearned { from, to }));
+                        this.show_message(label.into(), NoticeKind::Info, PASTE_FAILED_FOR, undo);
                         cx.notify();
                     }
                 }
@@ -107,7 +115,7 @@ impl Overlay {
             from_width: 0.0,
             message: None,
             message_for: MESSAGE_FOR,
-            copy_text: None,
+            action: None,
             input_region: None,
             #[cfg(not(target_os = "linux"))]
             placed: false,
@@ -125,10 +133,10 @@ impl Overlay {
         this
     }
 
-    fn show_message(&mut self, text: SharedString, kind: NoticeKind, lasts: Duration, copy: Option<SharedString>) {
+    fn show_message(&mut self, text: SharedString, kind: NoticeKind, lasts: Duration, action: Option<(SharedString, Command)>) {
         self.message = Some((text, kind, Instant::now()));
         self.message_for = lasts;
-        self.copy_text = copy;
+        self.action = action;
         self.set_visual(Visual::Message);
     }
 
@@ -155,7 +163,7 @@ impl Overlay {
         };
         if v != Visual::Message {
             self.message = None;
-            self.copy_text = None;
+            self.action = None;
         }
         if matches!(v, Visual::Listening) && self.visual == Visual::Hidden {
             self.levels.iter_mut().for_each(|l| *l = 0.0);
@@ -186,7 +194,7 @@ impl Overlay {
             Visual::Thinking => 92.,
             Visual::Message => {
                 let len = self.message.as_ref().map_or(0, |m| m.0.len());
-                let button = if self.copy_text.is_some() { COPY_BUTTON_W } else { 0. };
+                let button = if self.action.is_some() { ACTION_BUTTON_W } else { 0. };
                 (len as f32 * 7.0 + 56. + button).clamp(160., 420.)
             }
         }
@@ -350,9 +358,9 @@ impl Render for Overlay {
                     .text_color(tint)
                     .whitespace_nowrap()
                     .child(text);
-                match self.copy_text.clone() {
+                match self.action.clone() {
                     None => div().px(px(16.)).child(label).into_any_element(),
-                    Some(copy) => {
+                    Some((button_label, command)) => {
                         let s = state.clone();
                         h_row()
                             .pl(px(16.))
@@ -361,7 +369,7 @@ impl Render for Overlay {
                             .child(label)
                             .child(
                                 div()
-                                    .id("copy-text")
+                                    .id("message-action")
                                     .h(px(24.))
                                     .px(px(12.))
                                     .flex()
@@ -373,8 +381,8 @@ impl Render for Overlay {
                                     .text_size(px(12.))
                                     .font_weight(FontWeight::SEMIBOLD)
                                     .text_color(white)
-                                    .child("Copy")
-                                    .on_click(move |_, _, cx| s.read(cx).send(Command::CopyText(copy.to_string()))),
+                                    .child(button_label)
+                                    .on_click(move |_, _, cx| s.read(cx).send(command.clone())),
                             )
                             .into_any_element()
                     }

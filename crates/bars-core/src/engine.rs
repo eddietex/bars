@@ -2,6 +2,7 @@
 //! transcription requests in order.
 
 use std::path::Path;
+use std::sync::Arc;
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -12,6 +13,7 @@ use transcribe_rs::onnx::canary::CanaryModel;
 use transcribe_rs::onnx::parakeet::ParakeetModel;
 use transcribe_rs::{SpeechModel, TranscribeOptions};
 
+use crate::learn::{self, Heard, Pieces};
 use crate::models::{self, Family, ModelInfo};
 
 #[derive(Clone, Debug, PartialEq)]
@@ -32,10 +34,16 @@ pub struct Transcript {
     pub audio_secs: f32,
     pub infer_ms: u64,
     pub model: String,
+    /// The words as the model heard them, with its confidence in each
+    /// (Parakeet only; learning from corrections uses them).
+    pub heard: Option<Vec<Heard>>,
 }
 
 pub enum EngineEvent {
     Status(EngineStatus),
+    /// The loaded model's vocabulary, which learning needs. None for models
+    /// learning doesn't support.
+    Pieces(Option<Arc<Pieces>>),
     Done(Transcript),
     Failed { request: u64, error: String },
 }
@@ -85,10 +93,38 @@ impl Engine {
     }
 }
 
+/// Parakeet is kept by type: learning reads its confidences.
+enum Model {
+    Parakeet(ParakeetModel),
+    Other(Box<dyn SpeechModel + Send>),
+}
+
+impl Model {
+    fn speech(&mut self) -> &mut dyn SpeechModel {
+        match self {
+            Model::Parakeet(m) => m,
+            Model::Other(m) => m.as_mut(),
+        }
+    }
+
+    /// The words of the last transcription, with confidences.
+    fn heard(&mut self) -> Option<Vec<Heard>> {
+        let Model::Parakeet(m) = self else { return None };
+        let record = m.take_decode()?;
+        let vocab = m.vocab();
+        let tokens: Vec<&str> = record
+            .tokens
+            .iter()
+            .map(|&t| vocab.get(t as usize).map_or("", String::as_str))
+            .collect();
+        Some(learn::heard_words(&tokens, &record.probs))
+    }
+}
+
 struct Loaded {
     id: String,
     family: Family,
-    model: Box<dyn SpeechModel + Send>,
+    model: Model,
 }
 
 struct Worker {
@@ -150,12 +186,14 @@ impl Worker {
                     match result {
                         Ok((text, infer_ms)) => {
                             let model = self.loaded.as_ref().map(|l| l.id.clone()).unwrap_or_default();
+                            let heard = self.loaded.as_mut().and_then(|l| l.model.heard());
                             let _ = self.events.send(EngineEvent::Done(Transcript {
                                 request,
                                 text,
                                 audio_secs: samples.len() as f32 / crate::audio::SAMPLE_RATE as f32,
                                 infer_ms,
                                 model,
+                                heard,
                             }));
                         }
                         Err(e) => {
@@ -190,11 +228,17 @@ impl Worker {
         }
         self.status(EngineStatus::Loading(id.clone()));
         let started = Instant::now();
-        match load(info, &info.dir(), self.threads) {
+        match load_model(info, &info.dir()) {
             Ok(mut model) => {
                 // Warm-up pass: the first inference pays for allocator/kernel
                 // setup; do it now instead of on the user's first dictation.
-                let _ = model.transcribe(&vec![0.0; 16_000], &TranscribeOptions::default());
+                let _ = model.speech().transcribe(&vec![0.0; 16_000], &TranscribeOptions::default());
+                let _ = model.heard();
+                let pieces = match &model {
+                    Model::Parakeet(m) => Some(Arc::new(Pieces::from_vocab(m.vocab()))),
+                    Model::Other(_) => None,
+                };
+                let _ = self.events.send(EngineEvent::Pieces(pieces));
                 let load_ms = started.elapsed().as_millis() as u64;
                 log::info!("loaded {} in {load_ms} ms", info.id);
                 self.loaded = Some(Loaded {
@@ -232,9 +276,16 @@ impl Worker {
             },
             _ => options,
         };
-        let result = loaded.model.transcribe(samples, &options).map_err(|e| anyhow!("{e}"))?;
+        let result = loaded.model.speech().transcribe(samples, &options).map_err(|e| anyhow!("{e}"))?;
         Ok((result.text.trim().to_string(), started.elapsed().as_millis() as u64))
     }
+}
+
+fn load_model(info: &ModelInfo, dir: &Path) -> anyhow::Result<Model> {
+    Ok(match info.family {
+        Family::Parakeet => Model::Parakeet(ParakeetModel::load(dir, &Quantization::Int8).map_err(|e| anyhow!("{e}"))?),
+        _ => Model::Other(load(info, dir, None)?),
+    })
 }
 
 /// Loads a model by family. ONNX Runtime picks its intra-op thread count

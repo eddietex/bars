@@ -1,0 +1,77 @@
+--- a/src/onnx/parakeet/mod.rs
++++ b/src/onnx/parakeet/mod.rs
+@@ -82,6 +82,15 @@
+     tokens: Vec<String>,
+ }
+ 
++/// The tokens of the last decode and how sure the model was of each
++/// (Bars: learning from corrections trusts edits of unsure words).
++#[derive(Clone, Debug, Default)]
++pub struct DecodeRecord {
++    pub tokens: Vec<i32>,
++    /// Probability the model gave each token when it chose it.
++    pub probs: Vec<f32>,
++}
++
+ pub struct ParakeetModel {
+     encoder: Session,
+     decoder_joint: Session,
+@@ -89,6 +98,7 @@
+     vocab: Vec<String>,
+     blank_idx: i32,
+     vocab_size: usize,
++    last: Option<DecodeRecord>,
+ }
+ 
+ impl ParakeetModel {
+@@ -125,9 +135,20 @@
+             vocab,
+             blank_idx,
+             vocab_size,
++            last: None,
+         })
+     }
+ 
++    /// Takes what the last decode left behind (see [`DecodeRecord`]).
++    pub fn take_decode(&mut self) -> Option<DecodeRecord> {
++        self.last.take()
++    }
++
++    /// Token texts by id (word starts begin with a space).
++    pub fn vocab(&self) -> &[String] {
++        &self.vocab
++    }
++
+     /// Default leading silence in milliseconds.
+     const DEFAULT_LEADING_SILENCE_MS: u32 = 250;
+ 
+@@ -333,6 +354,7 @@
+         let mut prev_state = self.create_decoder_state()?;
+         let mut tokens = Vec::new();
+         let mut timestamps = Vec::new();
++        let mut token_probs = Vec::new();
+ 
+         let mut t = 0;
+         let mut emitted_tokens = 0;
+@@ -361,6 +383,10 @@
+                 .unwrap_or(self.blank_idx);
+ 
+             if token != self.blank_idx {
++                // Softmax probability of the chosen (top) token.
++                let top = vocab_logits[token as usize];
++                let sum: f32 = vocab_logits.iter().map(|l| (l - top).exp()).sum();
++                token_probs.push(1.0 / sum);
+                 prev_state = new_state;
+                 tokens.push(token);
+                 timestamps.push(t);
+@@ -373,6 +399,10 @@
+             }
+         }
+ 
++        self.last = Some(DecodeRecord {
++            tokens: tokens.clone(),
++            probs: token_probs,
++        });
+         Ok((tokens, timestamps))
+     }
+ 

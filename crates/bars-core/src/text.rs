@@ -59,7 +59,7 @@ impl TextProcessor {
             replacements: compile(
                 cfg.dictionary
                     .iter()
-                    .map(|Replacement { from, to }| (from.as_str(), to.as_str()))
+                    .map(|Replacement { from, to, .. }| (from.as_str(), to.as_str()))
                     .collect(),
             ),
             snippets: compile(
@@ -82,7 +82,7 @@ impl TextProcessor {
         }
 
         for (re, to) in &self.replacements {
-            text = re.replace_all(&text, regex::NoExpand(to)).into_owned();
+            text = replace_words(re, &text, to);
         }
 
         // Snippets: if the whole utterance is just the cue, emit the expansion
@@ -106,6 +106,28 @@ impl TextProcessor {
         }
         text
     }
+}
+
+/// Replaces whole-word matches, except inside a contraction ("don" in
+/// "don't"): the regex crate has no lookaround to say so.
+fn replace_words(re: &Regex, text: &str, to: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut last = 0;
+    for m in re.find_iter(text) {
+        let apostrophe = |c: char| c == '\'' || c == '’';
+        let mut after = text[m.end()..].chars();
+        let mut before = text[..m.start()].chars().rev();
+        let joined_after = after.next().is_some_and(apostrophe) && after.next().is_some_and(char::is_alphabetic);
+        let joined_before = before.next().is_some_and(apostrophe) && before.next().is_some_and(char::is_alphabetic);
+        if joined_after || joined_before {
+            continue;
+        }
+        out.push_str(&text[last..m.start()]);
+        out.push_str(to);
+        last = m.end();
+    }
+    out.push_str(&text[last..]);
+    out
 }
 
 fn tidy(text: &str) -> String {
@@ -401,6 +423,12 @@ mod tests {
         cfg.dictionary.push(Replacement {
             from: "chat gpt".into(),
             to: "ChatGPT".into(),
+            learned: false,
+        });
+        cfg.dictionary.push(Replacement {
+            from: "don".into(),
+            to: "Don".into(),
+            learned: true,
         });
         cfg.snippets.push(Snippet {
             trigger: "my email".into(),
@@ -408,6 +436,8 @@ mod tests {
         });
         let p = proc(cfg);
         assert_eq!(p.process("I asked Chat, GPT about it."), "I asked ChatGPT about it.");
+        // Not inside contractions.
+        assert_eq!(p.process("I don't know don."), "I don't know Don.");
         assert_eq!(p.process("My email."), "me@example.xyz");
         assert_eq!(p.process("Send it to my email please."), "Send it to me@example.xyz please.");
     }

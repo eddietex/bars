@@ -145,8 +145,8 @@ impl Shell {
                     }
                 }
             }
-            // Stays up longer: it offers the text to copy.
-            StateEvent::PasteFailed => {
+            // Stay up longer: they offer to copy the text, or to undo.
+            StateEvent::PasteFailed | StateEvent::Learned => {
                 if overlay_enabled {
                     self.show_overlay(cx);
                     if self.state.read(cx).phase == Phase::Idle {

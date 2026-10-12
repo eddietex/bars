@@ -1,4 +1,5 @@
 use gpui_kit::assets::IconName as I;
+use gpui_kit::component::input::{Textarea, TextareaState};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 use bars_core::controller::{Command, Phase};
@@ -150,6 +151,7 @@ impl SettingsView {
         let id = e.id;
         let text = e.text.clone();
         let copied = self.copied == Some(id);
+        let editor = self.editing.as_ref().filter(|(eid, _)| *eid == id).map(|(_, ed)| ed.clone());
         h_row()
             .id(ElementId::NamedInteger("entry".into(), id))
             .group("entry")
@@ -166,21 +168,75 @@ impl SettingsView {
                     .text_color(p.text_faint)
                     .child(e.at.format("%H:%M").to_string()),
             )
-            .child(
-                div()
+            .child(match editor {
+                // Correcting it here also teaches Bars the fix.
+                Some(editor) => v_col()
+                    .flex_1()
+                    .min_w_0()
+                    .gap(px(8.))
+                    .child(
+                        div()
+                            .px(px(10.))
+                            .py(px(6.))
+                            .rounded(px(8.))
+                            .border_1()
+                            .border_color(p.accent)
+                            .bg(p.surface)
+                            .text_size(px(13.5))
+                            .child(Textarea::new(&editor)),
+                    )
+                    .child(
+                        h_row()
+                            .gap(px(8.))
+                            .child(button(ElementId::NamedInteger("save".into(), id), "Save", ButtonKind::Primary, p).on_click(
+                                cx.listener(move |this, _, _, cx| {
+                                    if let Some((_, ed)) = this.editing.take() {
+                                        let text = ed.read(cx).value().to_string();
+                                        this.state.read(cx).send(Command::EditEntry { id, text });
+                                    }
+                                    cx.notify();
+                                }),
+                            ))
+                            .child(
+                                button(ElementId::NamedInteger("cancel".into(), id), "Cancel", ButtonKind::Ghost, p)
+                                    .on_click(cx.listener(|this, _, _, cx| {
+                                        this.editing = None;
+                                        cx.notify();
+                                    })),
+                            ),
+                    )
+                    .into_any_element(),
+                None => div()
                     .flex_1()
                     .min_w_0()
                     .text_size(px(13.5))
                     .line_height(px(20.))
                     .text_color(p.text)
-                    .child(e.text.clone()),
-            )
+                    .child(e.text.clone())
+                    .into_any_element(),
+            })
             .child(
                 h_row()
                     .flex_none()
                     .gap(px(2.))
                     .invisible()
                     .group_hover("entry", |s| s.visible())
+                    .child(
+                        icon_button(ElementId::NamedInteger("edit".into(), id), I::Pencil, p.text_muted, p).on_click(
+                            cx.listener({
+                                let text = text.clone();
+                                move |this, _, window, cx| {
+                                    let text = text.clone();
+                                    let editor = cx.new(|cx| {
+                                        TextareaState::new(window, cx).auto_grow(1, 8).default_value(text)
+                                    });
+                                    editor.update(cx, |ed, cx| ed.focus(window, cx));
+                                    this.editing = Some((id, editor));
+                                    cx.notify();
+                                }
+                            }),
+                        ),
+                    )
                     .child(
                         icon_button(
                             ElementId::NamedInteger("copy".into(), id),

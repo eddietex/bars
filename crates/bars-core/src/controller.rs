@@ -3,9 +3,9 @@
 //! sends [`Command`]s and renders [`Event`]s, which keeps it thin and makes
 //! the whole pipeline usable headless (CLI, tests, other front-ends).
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -13,10 +13,11 @@ use chrono::Local;
 use crossbeam_channel::{Receiver, Sender, select, unbounded};
 
 use crate::audio::{Audio, Cue};
-use crate::config::{Config, InsertionConfig};
+use crate::config::{Config, InsertionConfig, Replacement, Suggestion};
 use crate::engine::{Engine, EngineEvent, EngineStatus};
 use crate::history::{self, History, Stats};
 use crate::hotkey::{Activation, Chord, HotkeyEvent, Intent, Mods, Recognizer};
+use crate::learn::{self, Heard, Pieces, Placement, Verdict};
 use crate::models;
 use crate::paths;
 use crate::platform::focus::{self, Focus};
@@ -51,7 +52,13 @@ pub enum Command {
     /// Re-insert the most recent transcript.
     PasteLast,
     CopyText(String),
+    /// The user corrected a dictation on the History page.
+    EditEntry { id: u64, text: String },
     DeleteEntry(u64),
+    /// Take back a learned dictionary entry (and don't learn it again).
+    UndoLearned { from: String, to: String },
+    AcceptSuggestion { from: String, to: String },
+    DismissSuggestion { from: String, to: String },
     ClearHistory,
     Shutdown,
 }
@@ -60,6 +67,8 @@ pub enum Command {
 enum Internal {
     DownloadFinished { id: String, error: Option<String> },
     PermissionsFixed(Result<(), String>),
+    /// A dictation was edited in place after it went in.
+    Corrected { request: u64, inserted: String, edited: String },
 }
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
@@ -108,6 +117,10 @@ pub enum Event {
     /// macOS: the app whose Secure Keyboard Entry keeps the shortcut from
     /// working, or None once it's off.
     SecureInput(Option<String>),
+    /// A correction became a dictionary entry.
+    Learned { from: String, to: String },
+    /// Whether learning from corrections works with the selected model.
+    LearningAvailable(bool),
     Config(Box<Config>),
 }
 
@@ -148,6 +161,9 @@ enum InsertJob {
         /// Read the focused field now, rather than use what was read when
         /// the dictation started (e.g. "Paste last").
         fresh: bool,
+        /// Watch the field for corrections to learn from (the engine
+        /// request the text came from).
+        watch: Option<u64>,
     },
     Copy(String),
     /// Dictation started: note which app/window should receive the text,
@@ -157,6 +173,12 @@ enum InsertJob {
 
 /// How long insertion waits for the focused field to be read.
 const FOCUS_TIMEOUT: Duration = Duration::from_millis(400);
+/// After a dictation goes in, its field is re-read this often, for this
+/// long, to see corrections.
+const WATCH_EVERY: Duration = Duration::from_secs(1);
+const WATCH_FOR: Duration = Duration::from_secs(60);
+/// Recent dictations whose model confidences are kept for learning.
+const HEARD_KEPT: usize = 32;
 /// How often macOS is asked whether another app holds secure input.
 const SECURE_INPUT_POLL: Duration = Duration::from_secs(3);
 /// Secure input held this long (not just a password typed in passing) is
@@ -201,6 +223,14 @@ struct Controller {
     secure_input_since: Instant,
     secure_input_checked: Instant,
     secure_input_told: HashSet<String>,
+    /// The loaded model's vocabulary (Parakeet only: learning needs it).
+    pieces: Option<Arc<Pieces>>,
+    /// Model confidences for recent dictations, by engine request.
+    heard: VecDeque<(u64, Vec<Heard>)>,
+    /// Engine requests of recent History entries.
+    entry_requests: VecDeque<(u64, u64)>,
+    /// Bumped when a dictation starts: watchers of earlier ones stop.
+    watch_generation: Arc<AtomicU64>,
 }
 
 impl Controller {
@@ -213,8 +243,9 @@ impl Controller {
         let engine = Engine::spawn(engine_tx);
         let (hotkey_tx, hotkey_rx) = unbounded();
         let hotkeys = Hotkeys::start(cfg.hotkey.backend, cfg.hotkey.chord.clone(), hotkey_tx.clone());
-        let inserter = spawn_inserter(ui.clone(), &hotkeys);
         let (internal_tx, internal_rx) = unbounded();
+        let watch_generation = Arc::new(AtomicU64::new(0));
+        let inserter = spawn_inserter(ui.clone(), &hotkeys, internal_tx.clone(), watch_generation.clone());
         Controller {
             internal_tx,
             internal_rx,
@@ -247,6 +278,10 @@ impl Controller {
             secure_input_since: Instant::now(),
             secure_input_checked: Instant::now(),
             secure_input_told: HashSet::new(),
+            pieces: None,
+            heard: VecDeque::new(),
+            entry_requests: VecDeque::new(),
+            watch_generation,
         }
     }
 
@@ -496,10 +531,13 @@ impl Controller {
         }
         self.mic_testing = false;
         self.audio.start(self.cfg.audio.device.clone(), self.cfg.audio.keep_warm);
+        // Stop watching earlier dictations for corrections.
+        self.watch_generation.fetch_add(1, Ordering::Relaxed);
+        let learning = self.learning_active();
         let ins = &self.cfg.insertion;
         let _ = self.inserter.send(InsertJob::RememberTarget {
-            read_focus: ins.smart_spacing || ins.split_for_agents,
-            read_field: ins.smart_spacing,
+            read_focus: ins.smart_spacing || ins.split_for_agents || learning,
+            read_field: ins.smart_spacing || learning,
         });
         self.recording_since = Some(Instant::now());
         log::info!("dictation started");
@@ -559,6 +597,10 @@ impl Controller {
     fn on_engine(&mut self, ev: EngineEvent) {
         match ev {
             EngineEvent::Status(s) => self.emit(Event::Engine(s)),
+            EngineEvent::Pieces(pieces) => {
+                self.pieces = pieces;
+                self.emit(Event::LearningAvailable(self.pieces.is_some()));
+            }
             EngineEvent::Failed { request, error } => {
                 self.pending.remove(&request);
                 self.notice(NoticeKind::Error, format!("Transcription failed: {error}"));
@@ -572,11 +614,18 @@ impl Controller {
                     self.settle_phase();
                     return;
                 }
+                if let Some(heard) = t.heard.clone() {
+                    self.heard.push_back((t.request, heard));
+                    if self.heard.len() > HEARD_KEPT {
+                        self.heard.pop_front();
+                    }
+                }
                 let _ = self.inserter.send(InsertJob::Text {
                     text: cleaned.clone(),
                     cfg: self.cfg.insertion.clone(),
                     names: self.dictionary_words(),
                     fresh: false,
+                    watch: self.learning_active().then_some(t.request),
                 });
                 // What was said stays out of the logs (which can end up in
                 // the system journal), unless debugging.
@@ -603,6 +652,10 @@ impl Controller {
                         audio_secs: p.audio_secs,
                         infer_ms: t.infer_ms,
                     };
+                    self.entry_requests.push_back((entry.id, t.request));
+                    if self.entry_requests.len() > HEARD_KEPT {
+                        self.entry_requests.pop_front();
+                    }
                     self.history.append(entry.clone());
                     self.emit(Event::Dictated(entry));
                     self.emit(Event::History {
@@ -704,15 +757,44 @@ impl Controller {
                         cfg: self.cfg.insertion.clone(),
                         names: self.dictionary_words(),
                         fresh: true,
+                        watch: None,
                     });
                 }
             }
             Command::CopyText(text) => {
                 let _ = self.inserter.send(InsertJob::Copy(text));
             }
+            Command::EditEntry { id, text } => {
+                let text = text.trim().to_string();
+                if text.is_empty() {
+                    return;
+                }
+                if let Some(old) = self.history.update(id, &text) {
+                    let request = self.entry_requests.iter().find(|(e, _)| *e == id).map(|(_, r)| *r);
+                    self.learn_from(request, &old, &text);
+                }
+                self.emit_history();
+            }
             Command::DeleteEntry(id) => {
                 self.history.delete(id);
                 self.emit_history();
+            }
+            Command::UndoLearned { from, to } => {
+                let before = self.cfg.text.dictionary.len();
+                self.cfg.text.dictionary.retain(|r| !(r.learned && r.from == from && r.to == to));
+                if self.cfg.text.dictionary.len() != before {
+                    self.ignore_pair(from, to);
+                    self.save_learning();
+                }
+            }
+            Command::AcceptSuggestion { from, to } => {
+                self.add_learned(from, to);
+                self.save_learning();
+            }
+            Command::DismissSuggestion { from, to } => {
+                self.cfg.text.suggestions.retain(|s| !(s.from == from && s.to == to));
+                self.ignore_pair(from, to);
+                self.save_learning();
             }
             Command::ClearHistory => {
                 self.history.clear();
@@ -738,7 +820,7 @@ impl Controller {
                 self.bound_trigger = None;
             }
         }
-        self.inserter = spawn_inserter(self.ui.clone(), &self.hotkeys);
+        self.inserter = spawn_inserter(self.ui.clone(), &self.hotkeys, self.internal_tx.clone(), self.watch_generation.clone());
         self.emit_permissions();
         self.emit_hotkey_status();
     }
@@ -749,7 +831,7 @@ impl Controller {
             self.hotkeys =
                 Hotkeys::start(self.cfg.hotkey.backend, self.cfg.hotkey.chord.clone(), self.hotkey_tx.clone());
             self.sync_hotkeys_recording();
-            self.inserter = spawn_inserter(self.ui.clone(), &self.hotkeys);
+            self.inserter = spawn_inserter(self.ui.clone(), &self.hotkeys, self.internal_tx.clone(), self.watch_generation.clone());
             self.bound_trigger = None;
             self.emit_hotkey_status();
             self.emit_permissions();
@@ -762,6 +844,11 @@ impl Controller {
             self.recognizer = Recognizer::new(cfg.hotkey.activation);
         }
         if cfg.model != old.model {
+            if cfg.model.id != old.model.id {
+                // Known again once the new model has loaded.
+                self.pieces = None;
+                self.emit(Event::LearningAvailable(false));
+            }
             self.engine.select(&cfg.model.id, cfg.model.threads, cfg.model.unload_after_mins);
         }
         if cfg.audio.device != old.audio.device && self.mic_testing && self.phase == Phase::Idle {
@@ -834,11 +921,102 @@ impl Controller {
                 self.notice(NoticeKind::Info, "Keyboard access granted");
             }
             Internal::PermissionsFixed(Err(e)) => self.notice(NoticeKind::Error, e),
+            Internal::Corrected { request, inserted, edited } => self.learn_from(Some(request), &inserted, &edited),
         }
+    }
+
+    /// Learning from corrections is on, and the selected model supports it
+    /// (Parakeet: its confidences tell mishearings from rewordings).
+    fn learning_active(&self) -> bool {
+        self.cfg.text.learn
+            && self.pieces.is_some()
+            && models::find(&self.cfg.model.id).is_some_and(|m| m.family == models::Family::Parakeet)
+    }
+
+    /// Judges each small change between `before` and `after` (what was
+    /// dictated, and the user's correction of it). Clear fixes of
+    /// mishearings join the dictionary; plausible ones are suggested and
+    /// learned the second time they're seen. Nothing of the text is logged.
+    fn learn_from(&mut self, request: Option<u64>, before: &str, after: &str) {
+        if !self.learning_active() {
+            return;
+        }
+        let Some(pieces) = self.pieces.clone() else { return };
+        let Some(edits) = learn::find_edits(before, after) else {
+            log::debug!("learning: the dictation was rewritten, not corrected");
+            return;
+        };
+        let heard = request.and_then(|r| self.heard.iter().find(|(id, _)| *id == r)).map(|(_, h)| h.clone());
+        let mut changed = false;
+        for edit in edits {
+            let confidence = heard.as_ref().and_then(|h| learn::confidence_of(&edit, h));
+            let known: Vec<Replacement> =
+                self.cfg.text.dictionary.iter().chain(&self.cfg.text.ignored).cloned().collect();
+            let verdict = learn::judge(&edit, confidence, &pieces, &known);
+            log::info!("learning: a correction ({verdict:?}, model confidence {confidence:?})");
+            match verdict {
+                Verdict::Learn => {
+                    self.add_learned(edit.from, edit.to);
+                    changed = true;
+                }
+                Verdict::Suggest => {
+                    let suggestions = &mut self.cfg.text.suggestions;
+                    let seen = match suggestions.iter_mut().find(|s| s.from.eq_ignore_ascii_case(&edit.from) && s.to == edit.to) {
+                        Some(s) => {
+                            s.seen += 1;
+                            s.seen
+                        }
+                        None => {
+                            suggestions.push(Suggestion { from: edit.from.clone(), to: edit.to.clone(), seen: 1 });
+                            1
+                        }
+                    };
+                    if seen >= learn::PROMOTE_AFTER {
+                        self.add_learned(edit.from, edit.to);
+                    }
+                    changed = true;
+                }
+                Verdict::Ignore(_) => {}
+            }
+        }
+        if changed {
+            self.save_learning();
+        }
+    }
+
+    fn add_learned(&mut self, from: String, to: String) {
+        let text = &mut self.cfg.text;
+        text.suggestions.retain(|s| !(s.from.eq_ignore_ascii_case(&from) && s.to == to));
+        if text.dictionary.iter().any(|r| r.from.eq_ignore_ascii_case(&from) && r.to == to) {
+            return;
+        }
+        text.dictionary.push(Replacement { from: from.clone(), to: to.clone(), learned: true });
+        self.emit(Event::Learned { from, to });
+    }
+
+    fn ignore_pair(&mut self, from: String, to: String) {
+        let ignored = &mut self.cfg.text.ignored;
+        if !ignored.iter().any(|r| r.from == from && r.to == to) {
+            ignored.push(Replacement { from, to, learned: false });
+        }
+    }
+
+    /// Applies and saves learning's changes to the dictionary.
+    fn save_learning(&mut self) {
+        self.text = TextProcessor::new(&self.cfg.text);
+        if let Err(e) = self.cfg.save(&paths::config_file()) {
+            self.notice(NoticeKind::Error, format!("Couldn't save settings: {e:#}"));
+        }
+        self.emit(Event::Config(Box::new(self.cfg.clone())));
     }
 }
 
-fn spawn_inserter(ui: EventSender, hotkeys: &Hotkeys) -> Sender<InsertJob> {
+fn spawn_inserter(
+    ui: EventSender,
+    hotkeys: &Hotkeys,
+    internal: Sender<Internal>,
+    watch_generation: Arc<AtomicU64>,
+) -> Sender<InsertJob> {
     let (tx, rx) = unbounded::<InsertJob>();
     let held = hotkeys.mods_probe();
     thread::Builder::new()
@@ -849,18 +1027,31 @@ fn spawn_inserter(ui: EventSender, hotkeys: &Hotkeys) -> Sender<InsertJob> {
             let mut started_in: Option<Receiver<Focus>> = None;
             for job in rx {
                 match job {
-                    InsertJob::Text { text, cfg, names, fresh } => {
+                    InsertJob::Text { text, cfg, names, fresh, watch } => {
                         let wants = cfg.smart_spacing || cfg.split_for_agents;
                         let focus = if fresh {
-                            wants.then(|| focus::capture(cfg.smart_spacing, FOCUS_TIMEOUT))
+                            wants.then(|| focus::capture(cfg.smart_spacing.then_some(focus::CONTEXT_CHARS), FOCUS_TIMEOUT))
                         } else {
                             started_in.take().and_then(|rx| rx.recv_timeout(FOCUS_TIMEOUT).ok())
                         };
-                        insert_text(&mut injector, &ui, held.as_deref(), &text, &cfg, &names, focus.unwrap_or_default());
+                        let focus = focus.unwrap_or_default();
+                        let inserted =
+                            insert_text(&mut injector, &ui, held.as_deref(), &text, &cfg, &names, &focus);
+                        if let (Some(request), Some(inserted), Some(field)) = (watch, inserted, focus.field.as_ref()) {
+                            let generation = watch_generation.load(Ordering::Relaxed);
+                            let watch = Watch {
+                                request,
+                                inserted,
+                                placement: Placement::new(field),
+                                pid: focus.pid,
+                            };
+                            let (internal, gen_now) = (internal.clone(), watch_generation.clone());
+                            thread::spawn(move || watch.run(generation, &gen_now, &internal));
+                        }
                     }
                     InsertJob::RememberTarget { read_focus, read_field } => {
                         injector.remember_target();
-                        started_in = read_focus.then(|| focus::start_capture(read_field));
+                        started_in = read_focus.then(|| focus::start_capture(read_field.then_some(focus::CONTEXT_CHARS)));
                     }
                     InsertJob::Copy(text) => {
                         if let Err(e) = injector.copy(&text) {
@@ -882,8 +1073,50 @@ fn spawn_inserter(ui: EventSender, hotkeys: &Hotkeys) -> Sender<InsertJob> {
     tx
 }
 
+/// Follows a dictation in its field for a minute, to see whether the user
+/// corrects it. Stops early when another dictation starts, focus moves to
+/// another app, or the text around it goes (a chat message was sent).
+struct Watch {
+    request: u64,
+    inserted: String,
+    placement: Placement,
+    pid: Option<u32>,
+}
+
+impl Watch {
+    fn run(self, generation: u64, current: &AtomicU64, internal: &Sender<Internal>) {
+        let chars = self.inserted.chars().count() + 300;
+        let deadline = Instant::now() + WATCH_FOR;
+        let mut last: Option<String> = None;
+        while Instant::now() < deadline {
+            thread::sleep(WATCH_EVERY);
+            if current.load(Ordering::Relaxed) != generation {
+                break;
+            }
+            let now = focus::capture(Some(chars), FOCUS_TIMEOUT);
+            if now.pid != self.pid {
+                break;
+            }
+            let Some(field) = now.field else { break };
+            let text = format!("{}{}{}", field.before, field.selected, field.after);
+            match self.placement.locate(&text, self.inserted.len()) {
+                Some(found) => last = Some(found),
+                None => break,
+            }
+        }
+        if let Some(edited) = last.filter(|e| *e != self.inserted.trim()) {
+            let _ = internal.send(Internal::Corrected {
+                request: self.request,
+                inserted: self.inserted.trim().to_string(),
+                edited,
+            });
+        }
+    }
+}
+
 /// Fits `text` to the focused field, splits it for a terminal agent, and
 /// inserts it.
+/// Returns the text as it went in, unless it didn't.
 fn insert_text(
     injector: &mut Injector,
     ui: &EventSender,
@@ -891,15 +1124,15 @@ fn insert_text(
     text: &str,
     cfg: &InsertionConfig,
     names: &[String],
-    focus: Focus,
-) {
+    focus: &Focus,
+) -> Option<String> {
     log::debug!("inserting into {}", focus.summary());
     let text = match focus.field.as_ref().filter(|_| cfg.smart_spacing) {
         Some(field) => text::fit_to_field(text, field, cfg.trailing_space, names),
         None => text::finalize(text, cfg.trailing_space),
     };
     if text.is_empty() {
-        return;
+        return None;
     }
     // Typed text never collapses into "[Pasted text]".
     let agent = focus
@@ -937,7 +1170,9 @@ fn insert_text(
             );
             if how == Inserted::NotRead {
                 log::info!("no app read the paste: no text field had focus");
+                return None;
             }
+            Some(text)
         }
         Err(e) => {
             log::warn!("insert failed: {e:#}");
@@ -945,6 +1180,7 @@ fn insert_text(
                 kind: NoticeKind::Warning,
                 text: format!("{e:#}"),
             });
+            None
         }
     }
 }

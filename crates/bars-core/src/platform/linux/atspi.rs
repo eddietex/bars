@@ -15,7 +15,7 @@ use parking_lot::Mutex;
 use zbus::blocking::{Connection, MessageIterator};
 use zbus::zvariant::{OwnedObjectPath, OwnedValue, Structure, Value};
 
-use crate::platform::focus::{CONTEXT_CHARS, Focus};
+use crate::platform::focus::Focus;
 use crate::text::Surroundings;
 
 /// Each call to an app; a hung app costs at most this per call.
@@ -157,7 +157,7 @@ impl A11y {
         )
     }
 
-    fn surroundings(&self, bus: &str, path: &str) -> Option<Surroundings> {
+    fn surroundings(&self, bus: &str, path: &str, chars: usize) -> Option<Surroundings> {
         if self.role(bus, path) == Some(ROLE_PASSWORD_TEXT) {
             return None;
         }
@@ -170,7 +170,7 @@ impl A11y {
         } else {
             (caret, caret)
         };
-        let n = CONTEXT_CHARS as i32;
+        let n = chars as i32;
         Some(Surroundings {
             before: self.text(bus, path, (start - n).max(0), start)?,
             selected: self.text(bus, path, start, end)?,
@@ -179,7 +179,7 @@ impl A11y {
     }
 }
 
-pub fn read_focus(read_field: bool) -> Focus {
+pub fn read_focus(field_chars: Option<usize>) -> Focus {
     let Some(a) = a11y() else { return Focus::default() };
     let Some((bus, path)) = a.focused.lock().clone() else { return Focus::default() };
     // Focus may have moved to an app that sends no events.
@@ -194,7 +194,7 @@ pub fn read_focus(read_field: bool) -> Focus {
         app,
         pid,
         window_title: a.window_title(&bus, &path),
-        field: if read_field { a.surroundings(&bus, &path) } else { None },
+        field: field_chars.and_then(|n| a.surroundings(&bus, &path, n)),
         agent: None,
     }
 }

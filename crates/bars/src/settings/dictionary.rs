@@ -1,7 +1,14 @@
 use gpui_kit::assets::IconName as I;
 use gpui_kit::component::input::{Input, InputState};
+use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 use bars_core::config::{Replacement, Snippet};
+use bars_core::controller::Command;
+
+#[cfg(target_os = "linux")]
+const LEARN_HINT: &str = "When you fix a word Bars wrote, it adds the fix here. It rereads the text field for a minute after you dictate (apps with accessibility support, such as GTK apps); corrections on the History page always count. Only the word pairs are kept.";
+#[cfg(not(target_os = "linux"))]
+const LEARN_HINT: &str = "When you fix a word Bars wrote, it adds the fix here. It rereads the text field for a minute after you dictate, and corrections on the History page count too. Only the word pairs are kept.";
 
 use super::SettingsView;
 use crate::theme::{Palette, PaletteExt};
@@ -12,6 +19,7 @@ impl SettingsView {
         let p = cx.palette();
         let st = self.state.read(cx);
         let text_cfg = st.config.text.clone();
+        let learning_available = st.learning_available;
         let state = self.state.clone();
 
         let toggles = rows(
@@ -43,20 +51,94 @@ impl SettingsView {
                     p,
                 )
                 .into_any_element(),
+                row(
+                    "Learn from your corrections",
+                    Some(if learning_available {
+                        LEARN_HINT
+                    } else {
+                        "Works with Parakeet models, which say how sure they were of each word (Model page)."
+                    }),
+                    small_switch("learn", text_cfg.learn, {
+                        let state = state.clone();
+                        move |v, _, cx| {
+                            let v = *v;
+                            state.update(cx, |s, cx| s.edit_config(cx, |c| c.text.learn = v))
+                        }
+                    }),
+                    p,
+                )
+                .into_any_element(),
             ],
         );
+
+        // Corrections seen once, or not clearly a mishearing: the user decides.
+        let suggestions: Vec<AnyElement> = text_cfg
+            .suggestions
+            .iter()
+            .enumerate()
+            .map(|(i, s)| {
+                let (from, to) = (s.from.clone(), s.to.clone());
+                let (from2, to2) = (s.from.clone(), s.to.clone());
+                h_row()
+                    .px(px(18.))
+                    .py(px(8.))
+                    .gap(px(12.))
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .truncate()
+                            .text_size(px(13.5))
+                            .text_color(p.text_muted)
+                            .child(s.from.clone()),
+                    )
+                    .child(icon(I::ArrowRight, p.text_faint, 13.))
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .truncate()
+                            .text_size(px(13.5))
+                            .font_weight(FontWeight::MEDIUM)
+                            .child(s.to.clone()),
+                    )
+                    .child(
+                        button(ElementId::NamedInteger("sug-add".into(), i as u64), "Add", ButtonKind::Secondary, p)
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                let (from, to) = (from.clone(), to.clone());
+                                this.state.read(cx).send(Command::AcceptSuggestion { from, to });
+                            })),
+                    )
+                    .child(
+                        button(ElementId::NamedInteger("sug-no".into(), i as u64), "Dismiss", ButtonKind::Ghost, p)
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                let (from, to) = (from2.clone(), to2.clone());
+                                this.state.read(cx).send(Command::DismissSuggestion { from, to });
+                            })),
+                    )
+                    .into_any_element()
+            })
+            .collect();
 
         let replacements: Vec<AnyElement> = text_cfg
             .dictionary
             .iter()
             .enumerate()
             .map(|(i, r)| {
+                let (learned, from, to) = (r.learned, r.from.clone(), r.to.clone());
                 pair_row(
                     ElementId::NamedInteger("rep".into(), i as u64),
                     &r.from,
                     &r.to,
+                    learned.then_some("learned"),
                     p,
                     cx.listener(move |this, _, _, cx| {
+                        if learned {
+                            // Also keeps it from being learned again.
+                            let (from, to) = (from.clone(), to.clone());
+                            this.state.read(cx).send(Command::UndoLearned { from, to });
+                            return;
+                        }
                         this.state.update(cx, |s, cx| {
                             s.edit_config(cx, |c| {
                                 if i < c.text.dictionary.len() {
@@ -79,6 +161,7 @@ impl SettingsView {
                     ElementId::NamedInteger("snip".into(), i as u64),
                     &s.trigger,
                     &s.expansion,
+                    None,
                     p,
                     cx.listener(move |this, _, _, cx| {
                         this.state.update(cx, |s, cx| {
@@ -101,6 +184,9 @@ impl SettingsView {
                 p,
             ))
             .child(section("Clean-up", p).child(toggles))
+            .when(!suggestions.is_empty(), |el| {
+                el.child(section("Suggestions", p).child(rows(p, suggestions)))
+            })
             .child(
                 section("Word replacements", p)
                     .child(adder(
@@ -118,6 +204,7 @@ impl SettingsView {
                                     c.text.dictionary.push(Replacement {
                                         from: from.trim().to_string(),
                                         to: to.trim().to_string(),
+                                        learned: false,
                                     })
                                 })
                             });
@@ -180,6 +267,7 @@ fn pair_row(
     id: ElementId,
     left: &str,
     right: &str,
+    tag: Option<&'static str>,
     p: Palette,
     on_remove: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
 ) -> impl IntoElement {
@@ -208,6 +296,7 @@ fn pair_row(
                 .font_weight(FontWeight::MEDIUM)
                 .child(right.replace('\n', " ⏎ ")),
         )
+        .when_some(tag, |el, tag| el.child(badge(tag, p.accent_text)))
         .child(
             div()
                 .invisible()

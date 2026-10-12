@@ -34,6 +34,8 @@ pub enum StateEvent {
     Notice,
     /// A paste landed nowhere; `AppState::paste_failed` has the text.
     PasteFailed,
+    /// A correction was learned; `AppState::learned` has the pair.
+    Learned,
     ThemeChanged,
 }
 
@@ -60,6 +62,10 @@ pub struct AppState {
     pub paste_failed: Option<String>,
     /// macOS: the app whose Secure Keyboard Entry blocks the shortcut.
     pub secure_input: Option<String>,
+    /// The last correction learned (from, to), offered to undo.
+    pub learned: Option<(String, String)>,
+    /// The selected model supports learning from corrections.
+    pub learning_available: bool,
     pub devices: Vec<InputDevice>,
     /// The latest dictation's text and how many finished this session
     /// (kept even when history isn't saved).
@@ -93,6 +99,8 @@ impl AppState {
             notice: None,
             paste_failed: None,
             secure_input: None,
+            learned: None,
+            learning_available: false,
             // Filled in off the UI thread (see refresh_devices).
             devices: Vec::new(),
             last_transcript: None,
@@ -239,6 +247,11 @@ impl AppState {
                 cx.emit(StateEvent::PasteFailed);
             }
             Event::SecureInput(app) => self.secure_input = app,
+            Event::Learned { from, to } => {
+                self.learned = Some((from, to));
+                cx.emit(StateEvent::Learned);
+            }
+            Event::LearningAvailable(on) => self.learning_available = on,
             Event::Config(cfg) => self.config = *cfg,
         }
         cx.notify();

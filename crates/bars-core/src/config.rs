@@ -182,6 +182,17 @@ pub struct Replacement {
     pub from: String,
     /// What should be written ("ChatGPT").
     pub to: String,
+    /// Learned from a correction rather than added by hand.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub learned: bool,
+}
+
+/// A correction seen too few times (or too unclear) to learn outright.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct Suggestion {
+    pub from: String,
+    pub to: String,
+    pub seen: u32,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -200,6 +211,12 @@ pub struct TextConfig {
     pub voice_commands: bool,
     pub dictionary: Vec<Replacement>,
     pub snippets: Vec<Snippet>,
+    /// Learn dictionary words from corrections made after dictating
+    /// (Parakeet models only).
+    pub learn: bool,
+    pub suggestions: Vec<Suggestion>,
+    /// Corrections undone or dismissed: never suggested again.
+    pub ignored: Vec<Replacement>,
 }
 
 impl Default for TextConfig {
@@ -209,6 +226,9 @@ impl Default for TextConfig {
             voice_commands: true,
             dictionary: Vec::new(),
             snippets: Vec::new(),
+            learn: true,
+            suggestions: Vec::new(),
+            ignored: Vec::new(),
         }
     }
 }
@@ -288,6 +308,7 @@ mod tests {
         cfg.text.dictionary.push(Replacement {
             from: "example".into(),
             to: "Example".into(),
+            learned: true,
         });
         let s = toml::to_string_pretty(&cfg).unwrap();
         let back: Config = toml::from_str(&s).unwrap();
