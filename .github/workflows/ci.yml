@@ -31,8 +31,11 @@ jobs:
       - run: cargo test --workspace --locked
       - run: cargo build -p bars --locked
 
+  # Windows/macOS minutes are billed at 2x/10x on private repos, so these
+  # only run on demand: Actions > CI > Run workflow.
   check:
     name: ${{ matrix.name }} (build)
+    if: github.event_name == 'workflow_dispatch'
     strategy:
       fail-fast: false
       matrix:
