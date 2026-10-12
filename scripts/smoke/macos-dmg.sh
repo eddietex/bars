@@ -8,8 +8,10 @@ dmg=$(bash scripts/package-macos.sh | tail -1)
 echo "built $dmg"
 mount=$(hdiutil attach "$dmg" | awk -F'\t' '/\/Volumes\//{print $NF}' | tail -1)
 echo "mounted at $mount"
-ls -la "$mount" "$mount/.background"
+ls -la "$mount"
 [ -f "$mount/.DS_Store" ] || { echo "no Finder layout (.DS_Store) in the DMG"; exit 1; }
+# dmgbuild keeps the background next to the layout, not in .background/.
+ls "$mount"/.background* >/dev/null 2>&1 || { echo "no background image in the DMG"; exit 1; }
 open "$mount"
 sleep 4
 screencapture -x smoke/5-dmg.png || true
