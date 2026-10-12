@@ -20,6 +20,18 @@ rm -rf dist/*.app
 cargo packager --release -p bars --formats app
 app=$(ls -d dist/*.app | head -1)
 
+# The Mac icon: macOS 26 shows any icon not shaped like its own rounded
+# square on a grey plate, so the Mac gets packaging/macos/icon.png (made by
+# scripts/macos-icon.swift) instead of the Linux icons cargo-packager uses.
+iconset=$(mktemp -d)/Bars.iconset
+mkdir -p "$iconset"
+for size in 16 32 128 256 512; do
+  sips -z $size $size packaging/macos/icon.png --out "$iconset/icon_${size}x${size}.png" >/dev/null
+  sips -z $((size * 2)) $((size * 2)) packaging/macos/icon.png --out "$iconset/icon_${size}x${size}@2x.png" >/dev/null
+done
+icon_file=$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIconFile' "$app/Contents/Info.plist")
+iconutil -c icns "$iconset" -o "$app/Contents/Resources/$icon_file"
+
 # Sign the whole app, not just the executable (the linker's ad hoc
 # signature leaves Info.plist and resources unsealed, which macOS reports
 # as "damaged" for a downloaded copy). CI signs with the self-signed
