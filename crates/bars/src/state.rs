@@ -55,6 +55,10 @@ pub struct AppState {
     pub capture_error: Option<String>,
     pub notice: Option<Notice>,
     pub devices: Vec<InputDevice>,
+    /// The latest dictation's text and how many finished this session
+    /// (kept even when history isn't saved).
+    pub last_transcript: Option<String>,
+    pub transcripts: u64,
     pub level: Entity<LevelMeter>,
 }
 
@@ -83,6 +87,8 @@ impl AppState {
             notice: None,
             // Filled in off the UI thread (see refresh_devices).
             devices: Vec::new(),
+            last_transcript: None,
+            transcripts: 0,
             level: cx.new(|_| LevelMeter {
                 level: 0.0,
                 updated: Instant::now(),
@@ -192,6 +198,10 @@ impl AppState {
                 self.installed = models::installed().into_iter().collect();
             }
             Event::Captured(chord) => self.on_captured(chord, cx),
+            Event::Transcript(text) => {
+                self.last_transcript = Some(text);
+                self.transcripts += 1;
+            }
             Event::Dictated(entry) => self.history.push(entry),
             Event::History { entries, stats } => {
                 // An empty list with stats is a stats-only refresh.

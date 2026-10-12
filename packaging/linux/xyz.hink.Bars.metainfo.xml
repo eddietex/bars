@@ -44,6 +44,7 @@
           <li>The version is shown in the settings sidebar and by bars --version.</li>
           <li>macOS: switching microphones no longer freezes Bars, and Bars no longer changes the microphone's format for other apps.</li>
           <li>The setup assistant's microphone check lets you pick another microphone.</li>
+          <li>With "Save history" off, dictations are no longer recorded anywhere, and transcripts stay out of the logs.</li>
         </ul>
       </description>
     </release>

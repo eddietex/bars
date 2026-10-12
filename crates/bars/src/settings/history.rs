@@ -44,7 +44,15 @@ impl SettingsView {
 
         let state = self.state.clone();
         v_col()
-            .child(page_header("History", Some("Stored only on this computer."), p))
+            .child(page_header(
+                "History",
+                Some(if save {
+                    "Stored only on this computer."
+                } else {
+                    "Not saving: new dictations aren't recorded. Earlier ones stay until you clear them."
+                }),
+                p,
+            ))
             .child(
                 h_row()
                     .gap(px(10.))

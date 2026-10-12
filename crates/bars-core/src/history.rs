@@ -61,11 +61,11 @@ impl History {
         self.entries.last().map_or(1, |e| e.id + 1)
     }
 
-    pub fn append(&mut self, entry: Entry, persist: bool) {
-        if persist {
-            if let Err(e) = self.write_line(&entry) {
-                log::warn!("could not save history: {e}");
-            }
+    /// Adds and saves an entry. (With history off, the controller doesn't
+    /// call this at all: every entry in the list ends up on disk.)
+    pub fn append(&mut self, entry: Entry) {
+        if let Err(e) = self.write_line(&entry) {
+            log::warn!("could not save history: {e}");
         }
         self.entries.push(entry);
     }

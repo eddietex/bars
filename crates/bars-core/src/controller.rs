@@ -85,6 +85,9 @@ pub enum Event {
     Download { id: String, done: u64, total: u64 },
     DownloadFinished { id: String, error: Option<String> },
     Captured(Chord),
+    /// A dictation finished (always sent; carries only the text).
+    Transcript(String),
+    /// A dictation was added to the history (only while history is saved).
     Dictated(history::Entry),
     History { entries: Vec<history::Entry>, stats: Stats },
     Permissions(Permissions),
@@ -160,6 +163,8 @@ struct Controller {
     bound_trigger: Option<String>,
     internal_tx: Sender<Internal>,
     internal_rx: Receiver<Internal>,
+    /// The most recent dictation, for "Paste last" (never saved).
+    last_text: Option<String>,
     /// What the UI was last told about permissions.
     last_requirements: Vec<platform::requirements::Requirement>,
     /// macOS: while the shortcut backend is down, whether access was granted
@@ -205,6 +210,7 @@ impl Controller {
             mic_testing: false,
             bound_trigger: None,
             last_requirements: Vec::new(),
+            last_text: None,
             hotkey_access: platform::hotkey_access_granted(),
             hotkey_access_checked: Instant::now(),
         }
@@ -487,28 +493,38 @@ impl Controller {
                     text: out,
                     cfg: self.cfg.insertion.clone(),
                 });
+                // What was said stays out of the logs (which can end up in
+                // the system journal), unless debugging.
                 log::info!(
-                    "transcribed {:.1}s in {} ms: {:?}",
+                    "transcribed {:.1}s in {} ms ({} words)",
                     p.audio_secs,
                     t.infer_ms,
-                    cleaned
+                    text::word_count(&cleaned)
                 );
-                let entry = history::Entry {
-                    id: self.history.next_id(),
-                    at: Local::now(),
-                    words: text::word_count(&cleaned),
-                    raw: (t.text != cleaned).then(|| t.text.clone()),
-                    text: cleaned,
-                    model: t.model,
-                    audio_secs: p.audio_secs,
-                    infer_ms: t.infer_ms,
-                };
-                self.history.append(entry.clone(), self.cfg.ui.save_history);
-                self.emit(Event::Dictated(entry));
-                self.emit(Event::History {
-                    entries: Vec::new(),
-                    stats: self.history.stats(),
-                });
+                log::debug!("transcript: {cleaned:?}");
+                // Kept in memory only, for "Paste last".
+                self.last_text = Some(cleaned.clone());
+                self.emit(Event::Transcript(cleaned.clone()));
+                // History off: nothing is recorded, on disk or in the
+                // history list (which a later rewrite would save).
+                if self.cfg.ui.save_history {
+                    let entry = history::Entry {
+                        id: self.history.next_id(),
+                        at: Local::now(),
+                        words: text::word_count(&cleaned),
+                        raw: (t.text != cleaned).then(|| t.text.clone()),
+                        text: cleaned,
+                        model: t.model,
+                        audio_secs: p.audio_secs,
+                        infer_ms: t.infer_ms,
+                    };
+                    self.history.append(entry.clone());
+                    self.emit(Event::Dictated(entry));
+                    self.emit(Event::History {
+                        entries: Vec::new(),
+                        stats: self.history.stats(),
+                    });
+                }
                 self.settle_phase();
             }
         }
@@ -588,9 +604,13 @@ impl Controller {
                 });
             }
             Command::PasteLast => {
-                if let Some(last) = self.history.entries().last() {
+                let last = self
+                    .last_text
+                    .clone()
+                    .or_else(|| self.history.entries().last().map(|e| e.text.clone()));
+                if let Some(last) = last {
                     let _ = self.inserter.send(InsertJob::Text {
-                        text: text::finalize(&last.text, self.cfg.insertion.trailing_space),
+                        text: text::finalize(&last, self.cfg.insertion.trailing_space),
                         cfg: self.cfg.insertion.clone(),
                     });
                 }

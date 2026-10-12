@@ -49,7 +49,7 @@ pub struct Onboarding {
     level: f32,
     heard_voice: bool,
     elevating: bool,
-    history_baseline: usize,
+    transcripts_baseline: u64,
     try_result: Option<String>,
     _subs: Vec<Subscription>,
 }
@@ -64,8 +64,8 @@ impl Onboarding {
                 // A finished dictation during "Try it" is the success signal.
                 if this.step == Step::Try && this.try_result.is_none() {
                     let st = state.read(cx);
-                    if st.history.len() > this.history_baseline {
-                        this.try_result = st.history.last().map(|e| e.text.clone());
+                    if st.transcripts > this.transcripts_baseline {
+                        this.try_result = st.last_transcript.clone();
                     }
                 }
                 cx.notify();
@@ -116,7 +116,7 @@ impl Onboarding {
             level: 0.0,
             heard_voice: false,
             elevating: false,
-            history_baseline: 0,
+            transcripts_baseline: 0,
             try_result: None,
             _subs: subs,
         };
@@ -163,7 +163,7 @@ impl Onboarding {
                 }
             }
             Step::Try => {
-                self.history_baseline = self.state.read(cx).history.len();
+                self.transcripts_baseline = self.state.read(cx).transcripts;
                 self.try_result = None;
                 self.practice.update(cx, |s, cx| s.focus(window, cx));
             }
