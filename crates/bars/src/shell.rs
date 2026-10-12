@@ -17,8 +17,7 @@ use crate::theme;
 #[derive(Clone, Debug)]
 pub enum ShellCommand {
     Toggle,
-    /// Sent by `bars --cancel` (D-Bus, Linux).
-    #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+    /// Sent by `bars --cancel`.
     Cancel,
     PasteLast,
     ShowSettings(Option<Page>),

@@ -75,22 +75,31 @@ pub fn check(ctx: &Context) -> Vec<Requirement> {
 
 fn microphone() -> Requirement {
     let devices = crate::audio::list_input_devices();
-    #[cfg(target_os = "macos")]
-    let actions = vec![FixAction::OpenSettings {
-        label: "Open Microphone settings".into(),
-        url: "x-apple.systempreferences:com.apple.preference.security?Privacy_Microphone".into(),
-    }];
-    #[cfg(target_os = "windows")]
-    let actions = vec![FixAction::OpenSettings {
-        label: "Open microphone privacy settings".into(),
-        url: "ms-settings:privacy-microphone".into(),
-    }];
+    #[allow(unused_mut)]
+    let mut actions = Vec::new();
     #[cfg(not(any(target_os = "macos", target_os = "windows")))]
-    let actions = Vec::new();
-    #[cfg(target_os = "windows")]
-    let blocked = super::win::permissions::microphone_blocked();
-    #[cfg(not(target_os = "windows"))]
     let blocked = false;
+    #[cfg(target_os = "macos")]
+    let blocked = {
+        use super::mac::permissions::{MicAccess, microphone};
+        let access = microphone();
+        if access == MicAccess::NotAsked {
+            actions.push(FixAction::Elevate);
+        }
+        actions.push(FixAction::OpenSettings {
+            label: "Open Microphone settings".into(),
+            url: "x-apple.systempreferences:com.apple.preference.security?Privacy_Microphone".into(),
+        });
+        access != MicAccess::Granted
+    };
+    #[cfg(target_os = "windows")]
+    let blocked = {
+        actions.push(FixAction::OpenSettings {
+            label: "Open microphone privacy settings".into(),
+            url: "ms-settings:privacy-microphone".into(),
+        });
+        super::win::permissions::microphone_blocked()
+    };
     Requirement {
         id: ReqId::Microphone,
         title: "Microphone".into(),

@@ -7,6 +7,8 @@ pub mod linux;
 #[cfg(target_os = "macos")]
 pub mod mac;
 #[cfg(any(target_os = "windows", target_os = "macos"))]
+mod native_doctor;
+#[cfg(any(target_os = "windows", target_os = "macos"))]
 pub mod native_inject;
 pub mod requirements;
 #[cfg(target_os = "windows")]
@@ -41,18 +43,7 @@ pub fn doctor_report() -> String {
     }
     #[cfg(not(target_os = "linux"))]
     {
-        let p = check_permissions(&requirements::Context::default());
-        let mut out = format!("Bars {} diagnostics ({})\n", env!("CARGO_PKG_VERSION"), std::env::consts::OS);
-        for r in &p.items {
-            out += &format!("  [{:?}] {}\n", r.status, r.title);
-        }
-        for d in crate::audio::list_input_devices() {
-            out += &format!("  mic: {}{}\n", d.name, if d.is_default { " (default)" } else { "" });
-        }
-        for m in crate::models::CATALOG {
-            out += &format!("  model {}: {}\n", m.id, if m.is_installed() { "installed" } else { "-" });
-        }
-        out
+        native_doctor::report()
     }
 }
 
@@ -107,19 +98,32 @@ pub fn check_permissions(ctx: &requirements::Context) -> Permissions {
 
 /// Requests the OS-level access Bars needs (Linux: installs a udev rule
 /// via polkit).
-pub fn fix_permissions() -> anyhow::Result<()> {
+/// Asks for what's missing: everything, or just `only` where the platform
+/// can ask per item (macOS shows one system prompt per permission).
+pub fn fix_permissions(only: Option<requirements::ReqId>) -> anyhow::Result<()> {
     #[cfg(target_os = "linux")]
     {
+        let _ = only;
         linux::permissions::install_with_pkexec()
     }
     #[cfg(target_os = "macos")]
     {
-        // Shows the system prompts, which lead to System Settings.
-        mac::permissions::request();
+        use requirements::ReqId;
+        let want = |id: ReqId| only.is_none_or(|o| o == id);
+        if want(ReqId::Microphone) {
+            mac::permissions::request_microphone();
+        }
+        if want(ReqId::InputMonitoring) {
+            mac::permissions::request_listen();
+        }
+        if want(ReqId::Accessibility) {
+            mac::permissions::request_post();
+        }
         Ok(())
     }
     #[cfg(not(any(target_os = "linux", target_os = "macos")))]
     {
+        let _ = only;
         Ok(())
     }
 }

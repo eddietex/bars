@@ -163,8 +163,8 @@ impl SettingsView {
             .child(
                 h_row()
                     .px(px(2.))
-                    .pt(px(2.))
-                    .pb(px(22.))
+                    .pt(px(14.))
+                    .pb(px(24.))
                     .child(crate::brand::wordmark(204., p.dark)),
             )
             .child(

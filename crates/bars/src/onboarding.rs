@@ -91,6 +91,24 @@ impl Onboarding {
                 crate::theme::follow_system(window, cx);
             }),
         ];
+        // Permissions are often granted in system settings, outside Bars:
+        // re-check while a step is waiting on one.
+        cx.spawn(async move |this, cx| {
+            loop {
+                cx.background_executor().timer(std::time::Duration::from_millis(1500)).await;
+                let Ok(waiting) = this.update(cx, |this, cx| {
+                    let step = matches!(this.step, Step::Microphone | Step::Access);
+                    let pending = this.state.read(cx).permissions.items.iter().any(|r| !r.ok());
+                    step && pending
+                }) else {
+                    break;
+                };
+                if waiting {
+                    let _ = this.update(cx, |this, cx| this.state.read(cx).send(Command::PollPermissions));
+                }
+            }
+        })
+        .detach();
         let mut this = Onboarding {
             state,
             step: Step::Welcome,
@@ -212,6 +230,8 @@ impl Onboarding {
         let st = self.state.read(cx);
         let mic = st.permissions.items.iter().find(|r| r.id == ReqId::Microphone).cloned();
         let missing = mic.as_ref().is_some_and(|m| m.status == ReqStatus::Missing);
+        // A microphone is there, but the OS isn't letting Bars use it.
+        let blocked = missing && mic.as_ref().is_some_and(|m| m.granted_note.is_some());
         let device = mic.as_ref().and_then(|m| m.granted_note.clone()).unwrap_or_else(|| "Microphone".into());
         v_col()
             .gap(px(14.))
@@ -236,7 +256,9 @@ impl Onboarding {
                                     .child(icon(I::Mic, p.text_muted, 16.))
                                     .child(div().text_size(px(14.)).font_weight(FontWeight::MEDIUM).child(device)),
                             )
-                            .child(if missing {
+                            .child(if blocked {
+                                badge("Needs permission", p.warning).into_any_element()
+                            } else if missing {
                                 badge("No microphone found", p.danger).into_any_element()
                             } else if self.heard_voice {
                                 badge("Sounds good", p.success).into_any_element()
@@ -248,13 +270,17 @@ impl Onboarding {
             )
             .when(missing, |el| {
                 el.child(hint(
-                    "Plug in a microphone or headset, then go back and try again.",
+                    if blocked {
+                        "Allow Bars to use your microphone. This page updates as soon as you do."
+                    } else {
+                        "Plug in a microphone or headset, then go back and try again."
+                    },
                     p,
                 ))
             })
             .when_some(
                 mic.filter(|_| missing).map(|m| m.actions),
-                |el, actions| el.child(self.actions_row(&actions, p, cx)),
+                |el, actions| el.child(self.actions_row(ReqId::Microphone, &actions, p, cx)),
             )
             .into_any_element()
     }
@@ -308,11 +334,11 @@ impl Onboarding {
                         req.why.clone()
                     }),
             )
-            .when(!granted, |el| el.child(self.actions_row(&req.actions, p, cx)))
+            .when(!granted, |el| el.child(self.actions_row(req.id, &req.actions, p, cx)))
             .into_any_element()
     }
 
-    fn actions_row(&self, actions: &[FixAction], p: Palette, cx: &mut Context<Self>) -> AnyElement {
+    fn actions_row(&self, id: ReqId, actions: &[FixAction], p: Palette, cx: &mut Context<Self>) -> AnyElement {
         let mut primary = h_row().gap(px(10.)).flex_wrap();
         let mut extra = v_col().gap(px(10.));
         for (i, action) in actions.iter().enumerate() {
@@ -323,9 +349,11 @@ impl Onboarding {
                             .into_any_element()
                     } else {
                         button(("elevate", i), "Allow access", ButtonKind::Primary, p)
-                            .on_click(cx.listener(|this, _, _, cx| {
-                                this.elevating = true;
-                                this.state.read(cx).send(Command::FixPermissions);
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                // Linux waits on a password prompt; elsewhere
+                                // the OS dialog answers asynchronously.
+                                this.elevating = cfg!(target_os = "linux");
+                                this.state.read(cx).send(Command::FixPermissions(Some(id)));
                                 cx.notify();
                             }))
                             .into_any_element()

@@ -20,12 +20,16 @@ const SURFACE: Size<Pixels> = Size {
     width: px(440.),
     height: px(96.),
 };
-/// Windows/macOS windows can't be click-through, so hug the pill.
+/// Windows/macOS: clicks outside the pill pass through too (window region
+/// / mouse passthrough), but there's no compositor blur to confine, so hug
+/// the pill.
 #[cfg(not(target_os = "linux"))]
 const SURFACE: Size<Pixels> = Size {
     width: px(440.),
     height: px(56.),
 };
+/// Gap between a popup overlay and the taskbar/Dock.
+const SCREEN_MARGIN: f32 = 12.;
 const PILL_H: f32 = 36.;
 const BARS: usize = 13;
 
@@ -47,6 +51,11 @@ pub struct Overlay {
     from_width: f32,
     message: Option<(SharedString, NoticeKind, Instant)>,
     input_region: Option<Bounds<Pixels>>,
+    /// Moved to the active screen for the current appearance.
+    #[cfg(not(target_os = "linux"))]
+    placed: bool,
+    #[cfg(not(target_os = "linux"))]
+    native: crate::overlay_native::NativeOverlay,
     _subs: Vec<Subscription>,
 }
 
@@ -82,6 +91,10 @@ impl Overlay {
             from_width: 0.0,
             message: None,
             input_region: None,
+            #[cfg(not(target_os = "linux"))]
+            placed: false,
+            #[cfg(not(target_os = "linux"))]
+            native: Default::default(),
             _subs: subs,
         };
         // A notice may be what caused this overlay to open.
@@ -225,6 +238,19 @@ impl Render for Overlay {
                 Some(b) => window.set_input_region(Some(&capsule_rects(b))),
                 None => window.set_input_region(Some(&[])),
             }
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            if visible && !self.placed {
+                self.placed = true;
+                self.native.place_on_active_screen(window, SURFACE, SCREEN_MARGIN, cx);
+            } else if !visible && !animating {
+                self.placed = false;
+            }
+            // The window region also clips drawing (Windows), so keep the
+            // pill's area while it fades out.
+            let shown = (visible || animating).then_some(pill_bounds);
+            self.native.set_clickable(window, shown, cx);
         }
 
         let white: Hsla = rgb(0xffffff).into();
@@ -430,7 +456,8 @@ pub fn open(state: Entity<AppState>, cx: &mut App) -> Option<WindowHandle<Overla
         }
     }
     // Bottom centre of the primary display's work area (above the taskbar
-    // or Dock).
+    // or Dock); on Windows/macOS the overlay then follows the pointer's
+    // screen each time it appears.
     let placed = cx
         .primary_display()
         .map(|d| {
@@ -438,7 +465,7 @@ pub fn open(state: Entity<AppState>, cx: &mut App) -> Option<WindowHandle<Overla
             Bounds {
                 origin: point(
                     area.origin.x + (area.size.width - SURFACE.width) / 2.0,
-                    area.origin.y + area.size.height - SURFACE.height - px(12.),
+                    area.origin.y + area.size.height - SURFACE.height - px(SCREEN_MARGIN),
                 ),
                 size: SURFACE,
             }

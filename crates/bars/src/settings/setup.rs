@@ -93,7 +93,7 @@ impl SettingsView {
                     )
                     .child(
                         button("grant", "Allow access", ButtonKind::Primary, p).on_click(
-                            cx.listener(|this, _, _, cx| this.state.read(cx).send(Command::FixPermissions)),
+                            cx.listener(|this, _, _, cx| this.state.read(cx).send(Command::FixPermissions(None))),
                         ),
                     )
                     .into_any_element(),

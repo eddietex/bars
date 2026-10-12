@@ -3,9 +3,15 @@
 mod autostart;
 mod brand;
 #[cfg(target_os = "linux")]
+#[path = "ipc_dbus.rs"]
+mod ipc;
+#[cfg(any(target_os = "windows", target_os = "macos"))]
+#[path = "ipc_local.rs"]
 mod ipc;
 mod onboarding;
 mod overlay;
+#[cfg(any(target_os = "windows", target_os = "macos"))]
+mod overlay_native;
 mod settings;
 mod shell;
 mod state;
@@ -102,9 +108,9 @@ fn main() {
     let (shell_tx, shell_rx) = async_channel::unbounded::<ShellCommand>();
 
     // Single instance: if Bars is already running, forward and exit.
-    #[cfg(target_os = "linux")]
-    let _bus = match ipc::claim(shell_tx.clone()) {
-        Ok(Some(conn)) => Some(conn),
+    #[cfg(any(target_os = "linux", target_os = "windows", target_os = "macos"))]
+    let _instance = match ipc::claim(shell_tx.clone()) {
+        Ok(Some(instance)) => Some(instance),
         Ok(None) => {
             let method = remote.unwrap_or("ShowSettings");
             if let Err(e) = ipc::call(method) {
@@ -114,16 +120,15 @@ fn main() {
             return;
         }
         Err(e) => {
-            log::warn!("D-Bus unavailable ({e:#}); continuing without single-instance support");
+            log::warn!("remote control unavailable ({e:#}); continuing without single-instance support");
             None
         }
     };
-    // Windows: one instance at a time (two keyboard hooks would type twice).
+    // Windows: also a named mutex, so even a wedged instance can't be doubled
+    // (two keyboard hooks would type everything twice).
     #[cfg(target_os = "windows")]
     if !single_instance_windows() {
-        if remote.is_none() {
-            eprintln!("Bars is already running (see the tray).");
-        }
+        let _ = ipc::call(remote.unwrap_or("ShowSettings"));
         return;
     }
     if remote.is_some_and(|m| m != "ShowSettings") {

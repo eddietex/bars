@@ -42,7 +42,11 @@ pub enum Command {
     CancelDownload,
     DeleteModel(String),
     RefreshPermissions,
-    FixPermissions,
+    /// Cheap re-check while the setup assistant waits for the user to grant
+    /// something in system settings; acts only if anything changed.
+    PollPermissions,
+    /// Ask for missing permissions (all, or one where the OS asks per item).
+    FixPermissions(Option<platform::requirements::ReqId>),
     /// Re-insert the most recent transcript.
     PasteLast,
     CopyText(String),
@@ -156,6 +160,8 @@ struct Controller {
     bound_trigger: Option<String>,
     internal_tx: Sender<Internal>,
     internal_rx: Receiver<Internal>,
+    /// What the UI was last told about permissions.
+    last_requirements: Vec<platform::requirements::Requirement>,
 }
 
 impl Controller {
@@ -194,6 +200,7 @@ impl Controller {
             capturing: false,
             mic_testing: false,
             bound_trigger: None,
+            last_requirements: Vec::new(),
         }
     }
 
@@ -268,12 +275,43 @@ impl Controller {
         }
     }
 
-    fn emit_permissions(&self) {
-        let ctx = platform::requirements::Context {
+    fn permissions_context(&self) -> platform::requirements::Context {
+        platform::requirements::Context {
             hotkey_backend: self.hotkeys.backend_name(),
             prefers_portal: self.cfg.hotkey.backend == crate::config::HotkeyBackendKind::Portal,
+        }
+    }
+
+    fn emit_permissions(&mut self) {
+        let p = platform::check_permissions(&self.permissions_context());
+        self.last_requirements = p.items.clone();
+        self.emit(Event::Permissions(p));
+    }
+
+    fn poll_permissions(&mut self) {
+        let p = platform::check_permissions(&self.permissions_context());
+        let statuses = |items: &[platform::requirements::Requirement]| {
+            items.iter().map(|r| (r.id, r.status)).collect::<Vec<_>>()
         };
-        self.emit(Event::Permissions(platform::check_permissions(&ctx)));
+        if statuses(&p.items) != statuses(&self.last_requirements) {
+            use platform::requirements::ReqId;
+            let mic = |items: &[platform::requirements::Requirement]| {
+                items.iter().find(|r| r.id == ReqId::Microphone).map(|r| r.status)
+            };
+            // A stream opened before access was granted stays silent
+            // (macOS), so reopen the live microphone test.
+            if mic(&p.items) != mic(&self.last_requirements) && self.mic_testing && self.phase == Phase::Idle {
+                let device = self.cfg.audio.device.clone();
+                self.audio.cancel();
+                self.audio.set_warm(device.clone(), false);
+                self.audio.start(device, self.cfg.audio.keep_warm);
+            }
+            // Something was granted (or revoked): restart what depends on it.
+            self.refresh_permissions();
+        } else if p.items != self.last_requirements {
+            self.last_requirements = p.items.clone();
+            self.emit(Event::Permissions(p));
+        }
     }
 
     fn emit_hotkey_status(&self) {
@@ -510,11 +548,12 @@ impl Controller {
                 }
             }
             Command::RefreshPermissions => self.refresh_permissions(),
-            Command::FixPermissions => {
+            Command::PollPermissions => self.poll_permissions(),
+            Command::FixPermissions(only) => {
                 // The polkit prompt can stay open a while; don't block on it.
                 let tx = self.internal_tx.clone();
                 thread::spawn(move || {
-                    let r = platform::fix_permissions().map_err(|e| format!("{e:#}"));
+                    let r = platform::fix_permissions(only).map_err(|e| format!("{e:#}"));
                     let _ = tx.send(Internal::PermissionsFixed(r));
                 });
             }
@@ -563,16 +602,17 @@ impl Controller {
 
     fn apply_config(&mut self, new: Config) {
         let old = std::mem::replace(&mut self.cfg, new);
-        let cfg = &self.cfg;
-        if cfg.hotkey.backend != old.hotkey.backend {
-            self.hotkeys = Hotkeys::start(cfg.hotkey.backend, cfg.hotkey.chord.clone(), self.hotkey_tx.clone());
+        if self.cfg.hotkey.backend != old.hotkey.backend {
+            self.hotkeys =
+                Hotkeys::start(self.cfg.hotkey.backend, self.cfg.hotkey.chord.clone(), self.hotkey_tx.clone());
             self.inserter = spawn_inserter(self.ui.clone(), &self.hotkeys);
             self.bound_trigger = None;
             self.emit_hotkey_status();
             self.emit_permissions();
-        } else if cfg.hotkey.chord != old.hotkey.chord {
-            self.hotkeys.set_chord(cfg.hotkey.chord.clone());
+        } else if self.cfg.hotkey.chord != old.hotkey.chord {
+            self.hotkeys.set_chord(self.cfg.hotkey.chord.clone());
         }
+        let cfg = &self.cfg;
         if cfg.hotkey.activation != old.hotkey.activation {
             self.recognizer = Recognizer::new(cfg.hotkey.activation);
         }
@@ -634,6 +674,9 @@ impl Controller {
             }
             Internal::PermissionsFixed(Ok(())) => {
                 self.refresh_permissions();
+                // Elsewhere the OS prompts are still open; polling notices
+                // when the user answers.
+                #[cfg(target_os = "linux")]
                 self.notice(NoticeKind::Info, "Keyboard access granted");
             }
             Internal::PermissionsFixed(Err(e)) => self.notice(NoticeKind::Error, e),
