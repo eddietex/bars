@@ -2,12 +2,13 @@ use gpui_kit::assets::IconName as I;
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 use bars_core::config::{InsertMethod, OverlayMode, PasteKeys, ThemeMode};
-use bars_core::hotkey::Activation;
+use bars_core::controller::Command;
+use bars_core::hotkey::{Activation, Mods};
 
 use super::SettingsView;
 
 #[cfg(target_os = "macos")]
-const MODIFIER_ONLY_HINT: &str = "Works in every app. Modifier-only shortcuts like Ctrl + Cmd never type anything.";
+const MODIFIER_ONLY_HINT: &str = "Works in every app. Modifier-only shortcuts like Fn or Ctrl + Cmd never type anything.";
 #[cfg(target_os = "windows")]
 const MODIFIER_ONLY_HINT: &str = "Works in every app. Modifier-only shortcuts like Ctrl + Win never type anything.";
 #[cfg(not(any(target_os = "macos", target_os = "windows")))]
@@ -22,6 +23,19 @@ impl SettingsView {
         let cfg = st.config.clone();
         let capturing = st.capturing;
         let capture_error = st.capture_error.clone();
+        // The Globe key also opens the emoji picker/dictation unless told not to.
+        let globe_hint = cfg!(target_os = "macos") && cfg.hotkey.chord.mods.contains(Mods::FN);
+        let globe_link = div()
+            .id("globe-settings")
+            .text_color(p.accent_text)
+            .cursor_pointer()
+            .hover(|s| s.underline())
+            .child("Keyboard settings")
+            .on_click(cx.listener(|this, _, _, cx| {
+                this.state.read(cx).send(Command::OpenUrl(
+                    "x-apple.systempreferences:com.apple.Keyboard-Settings.extension".into(),
+                ))
+            }));
         let hotkeys_ok = st.hotkeys_active;
         let desktop_shortcut = st.desktop_shortcut;
         let shortcut_parts = st.shortcut_parts();
@@ -70,7 +84,7 @@ impl SettingsView {
                             move |_, _, cx| {
                                 state.update(cx, |s, cx| {
                                     if s.desktop_shortcut {
-                                        s.send(bars_core::controller::Command::ConfigureShortcut);
+                                        s.send(Command::ConfigureShortcut);
                                     } else {
                                         s.start_capture(cx)
                                     }
@@ -146,6 +160,19 @@ impl SettingsView {
                             ))
                             .when_some(capture_error, |el, e| {
                                 el.child(div().px(px(18.)).pb(px(12.)).text_size(px(12.5)).text_color(p.danger).child(e))
+                            })
+                            .when(globe_hint, |el| {
+                                el.child(
+                                    h_row()
+                                        .px(px(18.))
+                                        .pb(px(12.))
+                                        .gap(px(6.))
+                                        .flex_wrap()
+                                        .text_size(px(12.5))
+                                        .text_color(p.text_muted)
+                                        .child("macOS also reacts to Fn (🌐). Set “Press 🌐 key to” to “Do Nothing” in")
+                                        .child(globe_link),
+                                )
                             })
                             .when(!hotkeys_ok, |el| {
                                 el.child(

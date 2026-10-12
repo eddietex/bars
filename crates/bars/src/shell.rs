@@ -187,6 +187,7 @@ impl Shell {
     }
 
     pub fn show_onboarding(&mut self, cx: &mut Context<Self>) {
+        bring_to_front(cx);
         if let Some(h) = self.onboarding {
             if h.update(cx, |_, window, _| window.activate_window()).is_ok() {
                 return;
@@ -272,6 +273,7 @@ impl Shell {
     }
 
     pub fn show_settings(&mut self, page: Option<Page>, cx: &mut Context<Self>) {
+        bring_to_front(cx);
         if let Some(h) = self.settings {
             let alive = h
                 .update(cx, |root, window, cx| {
@@ -307,4 +309,13 @@ impl Shell {
             }
         }
     }
+}
+
+/// macOS: Bars has no Dock icon, so the app isn't active when the tray or a
+/// second launch asks for a window; activate it so the window comes forward.
+fn bring_to_front(cx: &mut App) {
+    #[cfg(target_os = "macos")]
+    cx.activate(true);
+    #[cfg(not(target_os = "macos"))]
+    let _ = cx;
 }

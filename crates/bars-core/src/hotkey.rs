@@ -15,17 +15,23 @@ bitflags::bitflags! {
         const ALT = 1 << 1;
         const SHIFT = 1 << 2;
         const SUPER = 1 << 3;
+        /// The Fn (Globe) key. Only Macs report it; elsewhere keyboards
+        /// handle it in firmware (a few Linux laptops send it too).
+        const FN = 1 << 4;
     }
 }
 
 impl Mods {
     pub fn labels(self) -> Vec<&'static str> {
         let mut out = Vec::new();
+        if self.contains(Mods::FN) {
+            out.push("Fn");
+        }
         if self.contains(Mods::CTRL) {
             out.push("Ctrl");
         }
         if self.contains(Mods::ALT) {
-            out.push("Alt");
+            out.push(ALT_LABEL);
         }
         if self.contains(Mods::SHIFT) {
             out.push("Shift");
@@ -36,6 +42,11 @@ impl Mods {
         out
     }
 }
+
+#[cfg(target_os = "macos")]
+const ALT_LABEL: &str = "Option";
+#[cfg(not(target_os = "macos"))]
+const ALT_LABEL: &str = "Alt";
 
 #[cfg(target_os = "macos")]
 const SUPER_LABEL: &str = "Cmd";
@@ -73,8 +84,9 @@ impl Chord {
         if self.mods.is_empty() {
             return Err("Shortcut must include at least one modifier (Ctrl, Alt, Shift or Super)");
         }
-        if self.key.is_none() && self.mods.bits().count_ones() < 2 {
-            return Err("A modifier-only shortcut needs at least two modifiers");
+        // Fn alone is fine: it never combines into anything else.
+        if self.key.is_none() && self.mods.bits().count_ones() < 2 && self.mods != Mods::FN {
+            return Err("A modifier-only shortcut needs at least two modifiers (or Fn on its own)");
         }
         Ok(())
     }
@@ -107,6 +119,7 @@ impl FromStr for Chord {
                 "alt" | "option" => mods |= Mods::ALT,
                 "shift" => mods |= Mods::SHIFT,
                 "super" | "meta" | "win" | "cmd" | "command" | "logo" => mods |= Mods::SUPER,
+                "fn" | "globe" => mods |= Mods::FN,
                 _ => {
                     if key.is_some() {
                         return Err(format!("more than one non-modifier key in '{s}'"));
@@ -495,6 +508,16 @@ mod tests {
         assert!("Space".parse::<Chord>().unwrap().is_valid().is_err());
         assert!("Ctrl".parse::<Chord>().unwrap().is_valid().is_err());
         assert!("Ctrl+F9".parse::<Chord>().unwrap().is_valid().is_ok());
+    }
+
+    #[test]
+    fn fn_key_alone_is_a_valid_shortcut() {
+        let c: Chord = "Fn".parse().unwrap();
+        assert_eq!(c.mods, Mods::FN);
+        assert!(c.is_valid().is_ok());
+        assert_eq!(c.to_string(), "Fn");
+        let c: Chord = "globe+ctrl".parse().unwrap();
+        assert_eq!(c.to_string().parse::<Chord>().unwrap(), c);
     }
 
     #[test]

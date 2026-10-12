@@ -5,6 +5,9 @@
     <!-- Shown in macOS's microphone permission prompt. -->
     <key>NSMicrophoneUsageDescription</key>
     <string>Bars listens while you hold your dictation shortcut and transcribes your speech on this Mac.</string>
+    <!-- A menu-bar app: no Dock icon or app menu. -->
+    <key>LSUIElement</key>
+    <true/>
     <key>NSHighResolutionCapable</key>
     <true/>
 </dict>

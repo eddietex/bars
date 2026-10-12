@@ -140,7 +140,11 @@ impl MacHotkeys {
 /// happened while the tap wasn't listening).
 fn sync_modifiers(pressed: &mut HashSet<u32>, flags: CGEventFlags) {
     for (code, m) in MODIFIERS {
-        let mask = if *m == Mods::SUPER {
+        let mask = if *m == Mods::FN {
+            // Also set while arrow/function keys are held, but Fn is only
+            // ever added from its own key code, so that can't fake a press.
+            CGEventFlags::CGEventFlagSecondaryFn
+        } else if *m == Mods::SUPER {
             CGEventFlags::CGEventFlagCommand
         } else if *m == Mods::SHIFT {
             CGEventFlags::CGEventFlagShift

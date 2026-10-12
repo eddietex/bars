@@ -1,5 +1,8 @@
 //! Bars: local voice dictation that types into any app.
 
+// Windows: a GUI app, so launching it doesn't open a console window.
+#![cfg_attr(target_os = "windows", windows_subsystem = "windows")]
+
 mod autostart;
 mod brand;
 #[cfg(target_os = "linux")]
@@ -78,6 +81,13 @@ fn single_instance_windows() -> bool {
 }
 
 fn main() {
+    // Windows: still print to the terminal Bars was started from, if any
+    // (`bars --doctor`, errors, logs).
+    #[cfg(target_os = "windows")]
+    unsafe {
+        use windows::Win32::System::Console::{ATTACH_PARENT_PROCESS, AttachConsole};
+        let _ = AttachConsole(ATTACH_PARENT_PROCESS);
+    }
     bars_core::audio::prepare_environment();
     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info,ort=warn,naga=warn,wgpu=warn,blade_graphics=warn,transcribe_rs=warn,zbus=error,tracing::span=off,pulseaudio::client::reactor=off"))
         .init();
@@ -142,6 +152,10 @@ fn main() {
 
     let reopen_tx = shell_tx.clone();
     let app = gpui_kit::application();
+    // macOS: a menu-bar app, without a Dock icon or app menu ("headless"
+    // here only sets that activation policy; windows still draw).
+    #[cfg(target_os = "macos")]
+    let app = app.with_windowing(WindowingRequest::Headless);
     app.on_reopen(move |_| {
         let _ = reopen_tx.try_send(ShellCommand::ShowSettings(None));
     });

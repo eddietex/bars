@@ -9,15 +9,14 @@ use interprocess::local_socket::{GenericFilePath, GenericNamespaced, ListenerOpt
 use crate::shell::ShellCommand;
 
 fn name() -> std::io::Result<Name<'static>> {
+    // Per user: Windows pipe names are shared by every session on the machine.
+    let user = std::env::var("USERNAME").or_else(|_| std::env::var("USER")).unwrap_or_default();
+    let file = format!("xyz.hink.Bars-{user}.sock");
     if GenericNamespaced::is_supported() {
-        "xyz.hink.Bars.sock".to_ns_name::<GenericNamespaced>().map(Name::into_owned)
+        file.to_ns_name::<GenericNamespaced>().map(Name::into_owned)
     } else {
-        // macOS: a per-user socket file.
-        let user = std::env::var("USER").unwrap_or_default();
-        std::env::temp_dir()
-            .join(format!("xyz.hink.Bars-{user}.sock"))
-            .to_fs_name::<GenericFilePath>()
-            .map(Name::into_owned)
+        // macOS: a socket file in the per-user temporary directory.
+        std::env::temp_dir().join(file).to_fs_name::<GenericFilePath>().map(Name::into_owned)
     }
 }
 

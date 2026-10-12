@@ -698,6 +698,7 @@ dependencies = [
  "ashpd",
  "async-channel",
  "bars-core",
+ "block2 0.6.2",
  "chrono",
  "env_logger 0.11.11",
  "gpui-kit",

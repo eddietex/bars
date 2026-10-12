@@ -13,6 +13,8 @@ pub const MODIFIERS: &[(K, Mods)] = &[
     (K::KEY_RIGHTSHIFT, Mods::SHIFT),
     (K::KEY_LEFTMETA, Mods::SUPER),
     (K::KEY_RIGHTMETA, Mods::SUPER),
+    // Rare: most laptops handle Fn in firmware.
+    (K::KEY_FN, Mods::FN),
 ];
 
 pub fn modifier_of(code: K) -> Option<Mods> {

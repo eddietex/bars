@@ -22,8 +22,13 @@ env:
 
 jobs:
   flatpak:
-    name: Linux (Flatpak)
-    runs-on: ubuntu-24.04
+    name: Linux (Flatpak, ${{ matrix.arch }})
+    strategy:
+      matrix:
+        include:
+          - { arch: x86_64, runner: ubuntu-24.04 }
+          - { arch: aarch64, runner: ubuntu-24.04-arm }
+    runs-on: ${{ matrix.runner }}
     container:
       image: ghcr.io/flathub-infra/flatpak-github-actions:freedesktop-26.08
       options: --privileged
@@ -32,19 +37,25 @@ jobs:
       - uses: flatpak/flatpak-github-actions/flatpak-builder@v6
         with:
           manifest-path: packaging/flatpak/xyz.hink.Bars.yml
-          bundle: bars-x86_64.flatpak
-          cache-key: flatpak-builder-${{ github.sha }}
+          arch: ${{ matrix.arch }}
+          bundle: bars-${{ matrix.arch }}.flatpak
+          cache-key: flatpak-builder-${{ matrix.arch }}-${{ github.sha }}
           upload-artifact: false
       - uses: actions/upload-artifact@v4
         with:
-          name: linux-flatpak
-          path: bars-x86_64.flatpak
+          name: linux-flatpak-${{ matrix.arch }}
+          path: bars-${{ matrix.arch }}.flatpak
 
   linux-tarball:
-    name: Linux (tarball)
+    name: Linux (tarball, ${{ matrix.arch }})
     # The prebuilt ONNX Runtime needs glibc >= 2.38 / GCC 13 libstdc++, so
     # this tarball targets 2024+ distros. The Flatpak covers everything else.
-    runs-on: ubuntu-24.04
+    strategy:
+      matrix:
+        include:
+          - { arch: x86_64, runner: ubuntu-24.04 }
+          - { arch: aarch64, runner: ubuntu-24.04-arm }
+    runs-on: ${{ matrix.runner }}
     steps:
       - uses: actions/checkout@v4
       - name: System dependencies
@@ -59,7 +70,7 @@ jobs:
       - run: cargo build --release -p bars --locked
       - name: Package
         run: |
-          dir=bars-linux-x86_64
+          dir=bars-linux-${{ matrix.arch }}
           mkdir -p $dir/share/applications $dir/share/metainfo $dir/udev
           install -Dm755 target/release/bars $dir/bin/bars
           cp packaging/linux/xyz.hink.Bars.desktop $dir/share/applications/
@@ -67,27 +78,42 @@ jobs:
           cp -r packaging/linux/icons $dir/share/icons
           cp packaging/linux/70-bars.rules $dir/udev/
           cp README.md LICENSE $dir/
-          tar czf bars-linux-x86_64.tar.gz $dir
+          tar czf $dir.tar.gz $dir
       - uses: actions/upload-artifact@v4
         with:
-          name: linux-tarball
-          path: bars-linux-x86_64.tar.gz
+          name: linux-tarball-${{ matrix.arch }}
+          path: bars-linux-${{ matrix.arch }}.tar.gz
 
   windows:
-    name: Windows (installer)
-    runs-on: windows-latest
+    name: Windows (installer, ${{ matrix.arch }})
+    strategy:
+      matrix:
+        include:
+          - { arch: x64, runner: windows-latest }
+          - { arch: arm64, runner: windows-11-arm }
+    runs-on: ${{ matrix.runner }}
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
+      # ring (TLS) builds its Arm assembly with clang.
+      - name: Clang (arm64)
+        if: matrix.arch == 'arm64'
+        shell: pwsh
+        run: |
+          if (-not (Get-Command clang -ErrorAction SilentlyContinue)) {
+            choco install llvm -y --no-progress
+            "C:\Program Files\LLVM\bin" | Out-File -Append -Encoding utf8 $env:GITHUB_PATH
+          }
       - uses: Swatinem/rust-cache@v2
       - run: cargo install cargo-packager --locked --version 0.11.8
       - run: cargo build --release -p bars --locked
       - run: cargo packager --release -p bars --formats nsis
       - uses: actions/upload-artifact@v4
         with:
-          name: windows
+          name: windows-${{ matrix.arch }}
           path: dist/*.exe
 
+  # Apple Silicon only: ONNX Runtime no longer ships Intel Mac builds.
   macos:
     name: macOS (Apple Silicon)
     runs-on: macos-14

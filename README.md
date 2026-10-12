@@ -109,18 +109,22 @@ pushed and attaches the results to a draft GitHub Release:
 
 | Platform | Artifact |
 | --- | --- |
-| Linux | `bars-x86_64.flatpak` (any distro) and `bars-linux-x86_64.tar.gz` (glibc 2.38+: Fedora 39+, Ubuntu 24.04+, Debian 13+) |
-| Windows | NSIS installer (`.exe`, per-user, no admin needed) |
-| macOS | `.dmg` (Apple Silicon, currently unsigned) |
+| Linux | `bars-{x86_64,aarch64}.flatpak` (any distro) and `bars-linux-{x86_64,aarch64}.tar.gz` (glibc 2.38+: Fedora 39+, Ubuntu 24.04+, Debian 13+) |
+| Windows | NSIS installer for x64 and arm64 (`.exe`, per-user, no admin needed) |
+| macOS | `.dmg` (Apple Silicon; ONNX Runtime no longer ships Intel Mac builds) |
 
 ```sh
 git tag v0.1.0 && git push origin v0.1.0
 ```
 
-Windows and macOS builds compile and package, but their hotkey, typing and
-tray backends aren't implemented yet, so dictation only works on Linux for
-now. macOS releases also need a Developer ID certificate and notarization
-before they open without a Gatekeeper warning.
+Windows and macOS builds are unsigned for now, so SmartScreen and Gatekeeper
+warn on first launch, and macOS may ask for Input Monitoring and
+Accessibility again after an update. Signing needs a code-signing
+certificate (Windows) and a Developer ID with notarization (macOS).
+
+CI (Actions > CI > Run workflow) also builds Windows and macOS and runs
+`scripts/smoke`: the app is started on a real runner, driven through its
+command line, and screenshots plus logs are uploaded.
 
 ## Layout
 
@@ -131,19 +135,22 @@ crates/bars-core   engine, audio, hotkeys, text injection, config, history
   src/engine.rs       model worker thread (transcribe-rs / ONNX Runtime)
   src/audio.rs        cpal capture (PulseAudio/PipeWire), resampling, cues
   src/text.rs         filler removal, dictionary, snippets, voice commands
-  src/platform/       OS backends; Linux: evdev, uinput, portals, clipboard
+  src/platform/       OS backends: linux/ (evdev, uinput, portals, clipboard),
+                      win/ (keyboard hook), mac/ (event tap, TCC permissions),
+                      native_inject.rs (Windows/macOS paste + typing)
 crates/bars        GPUI app: tray, overlay pill, settings window
+  src/overlay_native.rs  Windows/macOS pill: click-through, blur, active screen
+  src/ipc_*.rs          single instance + CLI (D-Bus on Linux, local socket elsewhere)
 third_party/        gpui-pre-linux with a Wayland frame-waker fix (see patch)
-packaging/          .desktop, AppStream, icons (from artwork/), udev rule, Flatpak manifest
+packaging/          .desktop, AppStream, icons (from artwork/), udev rule, Flatpak manifest, macOS Info.plist
+scripts/smoke/      Windows/macOS runtime smoke tests run by CI
 ```
 
-Windows and macOS slot in under `platform/` (hotkeys: low-level hook /
-CGEventTap; insertion: SendInput / CGEvent). Audio, models, UI, the
-controller and the setup assistant are already cross-platform; the
-assistant's permission list for macOS (Microphone, Accessibility, Input
-Monitoring) and Windows (microphone privacy) is defined in
-`platform/requirements.rs`. There are no Windows/macOS builds or installers
-yet.
+The shortcut, insertion, overlay, tray, autostart and permission backends
+are implemented on all three platforms. What the setup assistant asks for
+lives in `platform/requirements.rs`: keyboard access on Linux (udev rule),
+microphone privacy on Windows, and Microphone, Input Monitoring and
+Accessibility on macOS.
 
 Dev helpers: `BARS_ONBOARDING=<welcome|microphone|access|model|try|done>`
 opens the assistant at a step; `BARS_DEV_NO_ACCESS=1` previews it as a user

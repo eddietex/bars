@@ -250,7 +250,7 @@ impl Render for Overlay {
             // The window region also clips drawing (Windows), so keep the
             // pill's area while it fades out.
             let shown = (visible || animating).then_some(pill_bounds);
-            self.native.set_clickable(window, shown, cx);
+            self.native.update(window, shown, appear, cx);
         }
 
         let white: Hsla = rgb(0xffffff).into();
@@ -475,7 +475,13 @@ pub fn open(state: Entity<AppState>, cx: &mut App) -> Option<WindowHandle<Overla
         titlebar: None,
         kind: WindowKind::PopUp,
         window_bounds: Some(WindowBounds::Windowed(placed)),
-        window_background: WindowBackgroundAppearance::Transparent,
+        // Windows: acrylic, cut to the pill by the window region. macOS gets
+        // its blur from a separate backdrop (see overlay_native).
+        window_background: if cfg!(target_os = "windows") {
+            WindowBackgroundAppearance::Blurred
+        } else {
+            WindowBackgroundAppearance::Transparent
+        },
         focus: false,
         show: true,
         is_movable: false,

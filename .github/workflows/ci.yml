@@ -32,19 +32,28 @@ jobs:
       - run: cargo build -p bars --locked
 
   # Windows/macOS minutes are billed at 2x/10x on private repos, so these
-  # only run on demand: Actions > CI > Run workflow.
+  # only run on demand: Actions > CI > Run workflow. Besides building, they
+  # run the app (scripts/smoke) and upload screenshots and logs.
   check:
-    name: ${{ matrix.name }} (build)
+    name: ${{ matrix.name }} (build + smoke test)
     if: github.event_name == 'workflow_dispatch'
     strategy:
       fail-fast: false
       matrix:
         include:
-          - { name: Windows, os: windows-latest }
-          - { name: macOS, os: macos-14 }
+          - { name: Windows, os: windows-latest, smoke: pwsh scripts/smoke/windows.ps1 }
+          - { name: macOS, os: macos-14, smoke: bash scripts/smoke/macos.sh }
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - run: cargo build -p bars --locked
+      - name: Smoke test
+        run: ${{ matrix.smoke }}
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: smoke-${{ matrix.name }}
+          path: smoke/
+          if-no-files-found: ignore

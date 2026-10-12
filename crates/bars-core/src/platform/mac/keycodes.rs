@@ -31,6 +31,8 @@ pub const MODIFIERS: &[(u32, Mods)] = &[
     (0x3D, Mods::ALT),
     (0x3B, Mods::CTRL),
     (0x3E, Mods::CTRL),
+    // kVK_Function: Fn / Globe.
+    (0x3F, Mods::FN),
 ];
 
 pub struct MacKeys;
