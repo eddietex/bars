@@ -2,6 +2,7 @@
 //! the gesture recognizer that turns raw chord presses into dictation intents
 //! (push-to-talk, double-tap hands-free, toggle).
 
+use std::collections::{HashMap, HashSet};
 use std::fmt;
 use std::str::FromStr;
 use std::time::{Duration, Instant};
@@ -89,6 +90,11 @@ impl Chord {
             return Err("A modifier-only shortcut needs at least two modifiers (or Fn on its own)");
         }
         Ok(())
+    }
+
+    /// The shortcut is the Fn (Globe) key on its own.
+    pub fn is_fn_only(&self) -> bool {
+        self.mods == Mods::FN && self.key.is_none()
     }
 
     /// Labels for rendering keycaps, e.g. `["Ctrl", "Super", "Space"]`.
@@ -301,6 +307,136 @@ impl ChordTracker {
     /// Whether the chord is currently held (e.g. to suppress the Start menu).
     pub fn active(&self) -> bool {
         self.state == ChordState::Active
+    }
+}
+
+/// What [`KeyFilter`] needs to know about the moment a key changed.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct FilterInput<'a> {
+    pub chord: Option<&'a Chord>,
+    /// The tracker reported [`HotkeyEvent::Down`] for this very press.
+    pub completed_chord: bool,
+    /// A dictation is recording (Escape cancels it).
+    pub recording: bool,
+    /// The settings window is recording a new shortcut.
+    pub capturing: bool,
+}
+
+/// One change of a key, as a backend sees it.
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub enum KeyChange {
+    Press,
+    /// Autorepeat while held.
+    Repeat,
+    Release,
+}
+
+/// Decides which key events a backend that can drop input (macOS event
+/// tap, Windows keyboard hook, Linux while it holds the keyboards) keeps
+/// from the focused app: Escape cancels only the dictation, the key that
+/// finishes the shortcut types nothing, and recording a shortcut doesn't
+/// also trigger it in the app.
+///
+/// Modifiers always pass, since a dropped one would stay held in other
+/// apps. Fn is the exception when it is the whole shortcut, so the
+/// system's Globe-key action (emoji picker, input switch) doesn't fire too.
+#[derive(Debug, Default)]
+pub struct KeyFilter {
+    /// Keys whose press was dropped: their repeats and release go too.
+    dropped: HashSet<u32>,
+}
+
+impl KeyFilter {
+    /// Whether to drop this event. Repeats and the release follow the
+    /// press; every new press is decided afresh.
+    pub fn should_drop(&mut self, map: &dyn KeyMap, code: u32, change: KeyChange, input: &FilterInput) -> bool {
+        match change {
+            KeyChange::Release => return self.dropped.remove(&code),
+            KeyChange::Repeat => return self.dropped.contains(&code),
+            KeyChange::Press => {
+                self.dropped.remove(&code);
+            }
+        }
+        let drop = match map.modifier_of(code) {
+            Some(m) => m == Mods::FN && input.chord.is_some_and(Chord::is_fn_only),
+            None => {
+                input.capturing
+                    || (input.recording && map.is_escape(code))
+                    || (input.completed_chord
+                        && input.chord.and_then(|c| c.key.as_ref()).and_then(|k| map.code_of(&k.0)) == Some(code))
+            }
+        };
+        if drop {
+            self.dropped.insert(code);
+        }
+        drop
+    }
+
+    /// Whether this key's press was dropped (so its release must be too).
+    pub fn is_dropped(&self, code: u32) -> bool {
+        self.dropped.contains(&code)
+    }
+
+    /// Forget dropped presses (after the backend lost track of keys).
+    pub fn reset(&mut self) {
+        self.dropped.clear();
+    }
+}
+
+/// Keys that have looked held at least this long are checked against the
+/// OS's own key state before the shortcut can fire.
+pub const STALE_KEY_AGE: Duration = Duration::from_millis(2500);
+/// How often every held key is checked, so a shortcut whose release was
+/// missed still ends.
+pub const STALE_KEY_SWEEP: Duration = Duration::from_secs(5);
+
+/// The keys a backend believes are held, and since when. A release the
+/// backend never saw (secure input, a tap macOS switched off, a lost
+/// event) would otherwise keep a key "held" and block the shortcut.
+#[derive(Debug, Default)]
+pub struct HeldKeys {
+    pub keys: HashSet<u32>,
+    since: HashMap<u32, Instant>,
+}
+
+impl HeldKeys {
+    /// Returns whether the key was newly pressed (false for autorepeat).
+    pub fn press(&mut self, code: u32) -> bool {
+        let new = self.keys.insert(code);
+        if new {
+            self.since.insert(code, Instant::now());
+        }
+        new
+    }
+
+    pub fn release(&mut self, code: u32) {
+        self.keys.remove(&code);
+        self.since.remove(&code);
+    }
+
+    pub fn contains(&self, code: u32) -> bool {
+        self.keys.contains(&code)
+    }
+
+    pub fn clear(&mut self) {
+        self.keys.clear();
+        self.since.clear();
+    }
+
+    /// Drops keys held at least `min_age` that `is_down` reports as up.
+    /// Returns the dropped keys.
+    pub fn drop_stale(&mut self, min_age: Duration, is_down: impl Fn(u32) -> bool) -> Vec<u32> {
+        let now = Instant::now();
+        let stale: Vec<u32> = self
+            .since
+            .iter()
+            .filter(|(code, at)| now.saturating_duration_since(**at) >= min_age && !is_down(**code))
+            .map(|(code, _)| *code)
+            .collect();
+        for code in &stale {
+            self.release(*code);
+        }
+        stale
     }
 }
 
@@ -653,6 +789,83 @@ mod tests {
         feed(&mut t, &mut k, 2, false, &chord, true);
         let ev = feed(&mut t, &mut k, 3, false, &chord, true);
         assert_eq!(ev, vec![HotkeyEvent::Captured("Shift+Super+Space".parse().unwrap())]);
+    }
+
+    #[test]
+    fn filter_drops_escape_only_while_recording() {
+        let chord: Chord = "Ctrl+Super".parse().unwrap();
+        let mut f = KeyFilter::default();
+        let idle = FilterInput { chord: Some(&chord), ..Default::default() };
+        assert!(!f.should_drop(&TestMap, 99, KeyChange::Press, &idle));
+        assert!(!f.should_drop(&TestMap, 99, KeyChange::Release, &idle));
+        let rec = FilterInput { chord: Some(&chord), recording: true, ..Default::default() };
+        assert!(f.should_drop(&TestMap, 99, KeyChange::Press, &rec));
+        // Its autorepeat and release go too, even once recording stopped.
+        assert!(f.should_drop(&TestMap, 99, KeyChange::Repeat, &idle));
+        assert!(f.should_drop(&TestMap, 99, KeyChange::Release, &idle));
+        assert!(!f.should_drop(&TestMap, 99, KeyChange::Release, &idle));
+        // A press is decided afresh even if a release was missed.
+        assert!(f.should_drop(&TestMap, 99, KeyChange::Press, &rec));
+        assert!(!f.should_drop(&TestMap, 99, KeyChange::Press, &idle));
+    }
+
+    #[test]
+    fn filter_drops_the_key_completing_the_chord_but_never_modifiers() {
+        let chord: Chord = "Ctrl+Space".parse().unwrap();
+        let mut f = KeyFilter::default();
+        let done = FilterInput { chord: Some(&chord), completed_chord: true, ..Default::default() };
+        assert!(!f.should_drop(&TestMap, 1, KeyChange::Press, &done));
+        assert!(f.should_drop(&TestMap, 10, KeyChange::Press, &done));
+        assert!(f.should_drop(&TestMap, 10, KeyChange::Release, &FilterInput::default()));
+        assert!(!f.should_drop(&TestMap, 1, KeyChange::Release, &FilterInput::default()));
+        // Recording a new shortcut keeps its keys from the app too.
+        let cap = FilterInput { capturing: true, ..Default::default() };
+        assert!(f.should_drop(&TestMap, 11, KeyChange::Press, &cap));
+        assert!(!f.should_drop(&TestMap, 3, KeyChange::Press, &cap));
+    }
+
+    #[test]
+    fn filter_drops_fn_only_when_it_is_the_whole_shortcut() {
+        struct FnMap;
+        impl KeyMap for FnMap {
+            fn modifier_of(&self, code: u32) -> Option<Mods> {
+                match code {
+                    7 => Some(Mods::FN),
+                    1 => Some(Mods::CTRL),
+                    _ => None,
+                }
+            }
+            fn name_of(&self, _: u32) -> Option<String> {
+                None
+            }
+            fn code_of(&self, _: &str) -> Option<u32> {
+                None
+            }
+            fn is_escape(&self, _: u32) -> bool {
+                false
+            }
+        }
+        let mut f = KeyFilter::default();
+        let fn_only: Chord = "Fn".parse().unwrap();
+        let fn_ctrl: Chord = "Fn+Ctrl".parse().unwrap();
+        let press = KeyChange::Press;
+        assert!(f.should_drop(&FnMap, 7, press, &FilterInput { chord: Some(&fn_only), ..Default::default() }));
+        assert!(f.should_drop(&FnMap, 7, KeyChange::Release, &FilterInput::default()));
+        assert!(!f.should_drop(&FnMap, 7, press, &FilterInput { chord: Some(&fn_ctrl), ..Default::default() }));
+        assert!(!f.should_drop(&FnMap, 1, press, &FilterInput { chord: Some(&fn_only), ..Default::default() }));
+    }
+
+    #[test]
+    fn held_keys_drop_only_old_keys_the_os_says_are_up() {
+        let mut h = HeldKeys::default();
+        assert!(h.press(1));
+        assert!(!h.press(1));
+        h.press(2);
+        // Too young to check.
+        assert!(h.drop_stale(Duration::from_secs(60), |_| false).is_empty());
+        // Old enough: 2 is up, 1 is really held.
+        assert_eq!(h.drop_stale(Duration::ZERO, |c| c == 1), vec![2]);
+        assert!(h.contains(1) && !h.contains(2));
     }
 
     #[test]

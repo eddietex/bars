@@ -3,6 +3,9 @@
 use crate::hotkey::{KeyMap, Mods};
 
 pub const KVK_ESCAPE: u32 = 0x35;
+/// The Globe key's own key events (newer Apple keyboards), sent next to
+/// Fn's flag change.
+pub const KVK_GLOBE: u32 = 0xB3;
 
 const KEYS: &[(&str, u32)] = &[
     ("A", 0x00), ("S", 0x01), ("D", 0x02), ("F", 0x03), ("H", 0x04), ("G", 0x05), ("Z", 0x06),

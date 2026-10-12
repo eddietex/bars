@@ -3,7 +3,7 @@
 //! sends [`Command`]s and renders [`Event`]s, which keeps it thin and makes
 //! the whole pipeline usable headless (CLI, tests, other front-ends).
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread;
@@ -19,7 +19,8 @@ use crate::history::{self, History, Stats};
 use crate::hotkey::{Activation, Chord, HotkeyEvent, Intent, Mods, Recognizer};
 use crate::models;
 use crate::paths;
-use crate::platform::{self, Hotkeys, Injector, Permissions};
+use crate::platform::focus::{self, Focus};
+use crate::platform::{self, Hotkeys, Injector, Inserted, Permissions};
 use crate::text::{self, TextProcessor};
 
 /// Requests from the UI (or tray, D-Bus, CLI).
@@ -101,6 +102,12 @@ pub enum Event {
         trigger: Option<String>,
     },
     Notice { kind: NoticeKind, text: String },
+    /// A paste landed nowhere (no text field had focus); carries the text
+    /// so it can be copied.
+    PasteFailed(String),
+    /// macOS: the app whose Secure Keyboard Entry keeps the shortcut from
+    /// working, or None once it's off.
+    SecureInput(Option<String>),
     Config(Box<Config>),
 }
 
@@ -133,11 +140,28 @@ struct Pending {
 }
 
 enum InsertJob {
-    Text { text: String, cfg: InsertionConfig },
+    Text {
+        text: String,
+        cfg: InsertionConfig,
+        /// Dictionary words, which keep their capital in smart spacing.
+        names: Vec<String>,
+        /// Read the focused field now, rather than use what was read when
+        /// the dictation started (e.g. "Paste last").
+        fresh: bool,
+    },
     Copy(String),
-    /// Dictation started: note which app/window should receive the text.
-    RememberTarget,
+    /// Dictation started: note which app/window should receive the text,
+    /// and read what's around the cursor while the user talks.
+    RememberTarget { read_focus: bool, read_field: bool },
 }
+
+/// How long insertion waits for the focused field to be read.
+const FOCUS_TIMEOUT: Duration = Duration::from_millis(400);
+/// How often macOS is asked whether another app holds secure input.
+const SECURE_INPUT_POLL: Duration = Duration::from_secs(3);
+/// Secure input held this long (not just a password typed in passing) is
+/// worth a notice, once per app.
+const SECURE_INPUT_NOTICE: Duration = Duration::from_secs(6);
 
 struct Controller {
     cfg: Config,
@@ -171,6 +195,12 @@ struct Controller {
     /// at the last check, and when that was.
     hotkey_access: bool,
     hotkey_access_checked: Instant,
+    /// macOS: the app holding secure input, since when, and which apps the
+    /// user was already told about.
+    secure_input: Option<String>,
+    secure_input_since: Instant,
+    secure_input_checked: Instant,
+    secure_input_told: HashSet<String>,
 }
 
 impl Controller {
@@ -213,6 +243,10 @@ impl Controller {
             last_text: None,
             hotkey_access: platform::hotkey_access_granted(),
             hotkey_access_checked: Instant::now(),
+            secure_input: None,
+            secure_input_since: Instant::now(),
+            secure_input_checked: Instant::now(),
+            secure_input_told: HashSet::new(),
         }
     }
 
@@ -227,8 +261,15 @@ impl Controller {
     fn set_phase(&mut self, phase: Phase) {
         if self.phase != phase {
             self.phase = phase;
+            self.sync_hotkeys_recording();
             self.emit(Event::Phase(phase));
         }
+    }
+
+    /// Tells the shortcut backend whether (and how) a dictation records.
+    fn sync_hotkeys_recording(&self) {
+        let recording = matches!(self.phase, Phase::Recording { .. });
+        self.hotkeys.set_recording(recording, self.phase == (Phase::Recording { locked: true }));
     }
 
     fn run(mut self, rx: Receiver<Command>) {
@@ -240,9 +281,17 @@ impl Controller {
         if self.cfg.audio.keep_warm {
             self.audio.set_warm(self.cfg.audio.device.clone(), true);
         }
+        if self.cfg.insertion.smart_spacing || self.cfg.insertion.split_for_agents {
+            platform::prepare_focus_reading();
+        }
 
         loop {
-            let deadline = [self.recognizer.deadline(), self.start_cue_at, self.hotkey_access_check_at()]
+            let deadline = [
+                self.recognizer.deadline(),
+                self.start_cue_at,
+                self.hotkey_access_check_at(),
+                self.secure_input_check_at(),
+            ]
                 .into_iter()
                 .flatten()
                 .min();
@@ -286,6 +335,37 @@ impl Controller {
             }
             if self.hotkey_access_check_at().is_some_and(|t| now >= t) {
                 self.check_hotkey_access(now);
+            }
+            if self.secure_input_check_at().is_some_and(|t| now >= t) {
+                self.check_secure_input(now);
+            }
+        }
+    }
+
+    /// macOS: when to next ask whether another app holds secure input.
+    fn secure_input_check_at(&self) -> Option<Instant> {
+        (cfg!(target_os = "macos") && self.hotkeys.is_active())
+            .then(|| self.secure_input_checked + SECURE_INPUT_POLL)
+    }
+
+    /// Secure Keyboard Entry (Terminal, password managers, password fields)
+    /// hides every key from Bars, so the shortcut silently stops working.
+    /// Name the app responsible.
+    fn check_secure_input(&mut self, now: Instant) {
+        self.secure_input_checked = now;
+        let owner = platform::secure_input_owner();
+        if owner != self.secure_input {
+            if let Some(app) = &owner {
+                log::info!("{app} turned on secure keyboard entry; the shortcut can't be seen");
+            }
+            self.secure_input = owner.clone();
+            self.secure_input_since = now;
+            self.emit(Event::SecureInput(owner));
+        } else if let Some(app) = &owner {
+            if now.saturating_duration_since(self.secure_input_since) >= SECURE_INPUT_NOTICE
+                && self.secure_input_told.insert(app.clone())
+            {
+                self.notice(NoticeKind::Warning, format!("Shortcut paused: {app} has secure input on"));
             }
         }
     }
@@ -416,7 +496,11 @@ impl Controller {
         }
         self.mic_testing = false;
         self.audio.start(self.cfg.audio.device.clone(), self.cfg.audio.keep_warm);
-        let _ = self.inserter.send(InsertJob::RememberTarget);
+        let ins = &self.cfg.insertion;
+        let _ = self.inserter.send(InsertJob::RememberTarget {
+            read_focus: ins.smart_spacing || ins.split_for_agents,
+            read_field: ins.smart_spacing,
+        });
         self.recording_since = Some(Instant::now());
         log::info!("dictation started");
         // Delay the start sound slightly: chords that turn out to be part of
@@ -488,10 +572,11 @@ impl Controller {
                     self.settle_phase();
                     return;
                 }
-                let out = text::finalize(&cleaned, self.cfg.insertion.trailing_space);
                 let _ = self.inserter.send(InsertJob::Text {
-                    text: out,
+                    text: cleaned.clone(),
                     cfg: self.cfg.insertion.clone(),
+                    names: self.dictionary_words(),
+                    fresh: false,
                 });
                 // What was said stays out of the logs (which can end up in
                 // the system journal), unless debugging.
@@ -528,6 +613,11 @@ impl Controller {
                 self.settle_phase();
             }
         }
+    }
+
+    /// What dictionary entries write, which smart spacing never lowercases.
+    fn dictionary_words(&self) -> Vec<String> {
+        self.cfg.text.dictionary.iter().map(|r| r.to.clone()).collect()
     }
 
     fn settle_phase(&mut self) {
@@ -610,8 +700,10 @@ impl Controller {
                     .or_else(|| self.history.entries().last().map(|e| e.text.clone()));
                 if let Some(last) = last {
                     let _ = self.inserter.send(InsertJob::Text {
-                        text: text::finalize(&last, self.cfg.insertion.trailing_space),
+                        text: last,
                         cfg: self.cfg.insertion.clone(),
+                        names: self.dictionary_words(),
+                        fresh: true,
                     });
                 }
             }
@@ -642,6 +734,7 @@ impl Controller {
             );
             if next.is_active() || !self.hotkeys.is_active() {
                 self.hotkeys = next;
+                self.sync_hotkeys_recording();
                 self.bound_trigger = None;
             }
         }
@@ -655,6 +748,7 @@ impl Controller {
         if self.cfg.hotkey.backend != old.hotkey.backend {
             self.hotkeys =
                 Hotkeys::start(self.cfg.hotkey.backend, self.cfg.hotkey.chord.clone(), self.hotkey_tx.clone());
+            self.sync_hotkeys_recording();
             self.inserter = spawn_inserter(self.ui.clone(), &self.hotkeys);
             self.bound_trigger = None;
             self.emit_hotkey_status();
@@ -680,6 +774,10 @@ impl Controller {
         }
         if cfg.text != old.text {
             self.text = TextProcessor::new(&cfg.text);
+        }
+        let reads_focus = |c: &Config| c.insertion.smart_spacing || c.insertion.split_for_agents;
+        if reads_focus(cfg) && !reads_focus(&old) {
+            platform::prepare_focus_reading();
         }
         if let Err(e) = self.cfg.save(&paths::config_file()) {
             self.notice(NoticeKind::Error, format!("Couldn't save settings: {e:#}"));
@@ -747,34 +845,23 @@ fn spawn_inserter(ui: EventSender, hotkeys: &Hotkeys) -> Sender<InsertJob> {
         .name("bars-insert".into())
         .spawn(move || {
             let mut injector = Injector::new();
+            // What had focus when the current dictation started.
+            let mut started_in: Option<Receiver<Focus>> = None;
             for job in rx {
                 match job {
-                    InsertJob::Text { text, cfg } => {
-                        // Wait for the user to let go of the hotkey modifiers,
-                        // otherwise our paste chord would combine with them.
-                        match &held {
-                            Some(held) => {
-                                let deadline = Instant::now() + Duration::from_millis(1500);
-                                while held() != Mods::empty() && Instant::now() < deadline {
-                                    thread::sleep(Duration::from_millis(15));
-                                }
-                            }
-                            // Backend can't see physical keys (portal): give
-                            // fingers a moment to leave the modifiers.
-                            None => thread::sleep(Duration::from_millis(150)),
-                        }
-                        match injector.insert(&text, &cfg) {
-                            Ok(()) => log::info!("inserted {} characters ({:?})", text.chars().count(), cfg.method),
-                            Err(e) => {
-                                log::warn!("insert failed: {e:#}");
-                                let _ = ui.try_send(Event::Notice {
-                                    kind: NoticeKind::Warning,
-                                    text: format!("{e:#}"),
-                                });
-                            }
-                        }
+                    InsertJob::Text { text, cfg, names, fresh } => {
+                        let wants = cfg.smart_spacing || cfg.split_for_agents;
+                        let focus = if fresh {
+                            wants.then(|| focus::capture(cfg.smart_spacing, FOCUS_TIMEOUT))
+                        } else {
+                            started_in.take().and_then(|rx| rx.recv_timeout(FOCUS_TIMEOUT).ok())
+                        };
+                        insert_text(&mut injector, &ui, held.as_deref(), &text, &cfg, &names, focus.unwrap_or_default());
                     }
-                    InsertJob::RememberTarget => injector.remember_target(),
+                    InsertJob::RememberTarget { read_focus, read_field } => {
+                        injector.remember_target();
+                        started_in = read_focus.then(|| focus::start_capture(read_field));
+                    }
                     InsertJob::Copy(text) => {
                         if let Err(e) = injector.copy(&text) {
                             let _ = ui.try_send(Event::Notice {
@@ -793,4 +880,71 @@ fn spawn_inserter(ui: EventSender, hotkeys: &Hotkeys) -> Sender<InsertJob> {
         })
         .expect("spawn inserter");
     tx
+}
+
+/// Fits `text` to the focused field, splits it for a terminal agent, and
+/// inserts it.
+fn insert_text(
+    injector: &mut Injector,
+    ui: &EventSender,
+    held: Option<&(dyn Fn() -> Mods + Send + Sync)>,
+    text: &str,
+    cfg: &InsertionConfig,
+    names: &[String],
+    focus: Focus,
+) {
+    log::debug!("inserting into {}", focus.summary());
+    let text = match focus.field.as_ref().filter(|_| cfg.smart_spacing) {
+        Some(field) => text::fit_to_field(text, field, cfg.trailing_space, names),
+        None => text::finalize(text, cfg.trailing_space),
+    };
+    if text.is_empty() {
+        return;
+    }
+    // Typed text never collapses into "[Pasted text]".
+    let agent = focus
+        .agent
+        .filter(|_| cfg.split_for_agents && cfg.method != crate::config::InsertMethod::Type);
+    let pieces = match agent {
+        Some(agent) => text::split_for_agent(&text, agent),
+        None => vec![text.clone()],
+    };
+    if injector.waits_for_released_keys(cfg) {
+        // Wait for the user to let go of the hotkey modifiers, otherwise
+        // our paste chord would combine with them.
+        match held {
+            Some(held) => {
+                let deadline = Instant::now() + Duration::from_millis(1500);
+                while held() != Mods::empty() && Instant::now() < deadline {
+                    thread::sleep(Duration::from_millis(15));
+                }
+            }
+            // Backend can't see physical keys (portal): give fingers a
+            // moment to leave the modifiers.
+            None => thread::sleep(Duration::from_millis(150)),
+        }
+    }
+    let mut on_unread = || {
+        let _ = ui.try_send(Event::PasteFailed(text.trim().to_string()));
+    };
+    match injector.insert(&pieces, cfg, &mut on_unread) {
+        Ok(how) => {
+            log::info!(
+                "inserted {} characters in {} piece(s) ({:?}, {how:?})",
+                text.chars().count(),
+                pieces.len(),
+                cfg.method
+            );
+            if how == Inserted::NotRead {
+                log::info!("no app read the paste: no text field had focus");
+            }
+        }
+        Err(e) => {
+            log::warn!("insert failed: {e:#}");
+            let _ = ui.try_send(Event::Notice {
+                kind: NoticeKind::Warning,
+                text: format!("{e:#}"),
+            });
+        }
+    }
 }

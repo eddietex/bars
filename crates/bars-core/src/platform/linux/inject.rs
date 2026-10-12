@@ -1,20 +1,23 @@
 //! Text insertion on Linux: a uinput virtual keyboard (types keys or sends the
 //! paste shortcut) plus the Wayland clipboard (data-control protocol).
 
-use std::io::Read;
 use std::thread;
 use std::time::{Duration, Instant};
 
 use anyhow::{Context as _, anyhow, bail};
+use crossbeam_channel::Receiver;
 use evdev::uinput::VirtualDevice;
 use evdev::{AttributeSet, InputEvent, KeyCode};
 use wl_clipboard_rs::copy::{self, ClipboardType, MimeType as CopyMime, Source};
 use wl_clipboard_rs::paste::{self, ClipboardType as PasteClipboard, MimeType as PasteMime, Seat};
 
 use super::VIRTUAL_KEYBOARD_NAME;
+use super::data_control;
 use super::keymap::CharMap;
 use super::portal::PortalKeyboard;
 use crate::config::{InsertMethod, InsertionConfig, PasteKeys};
+use crate::platform::Inserted;
+use crate::platform::paste::{self as lazy, LazyClipboard, Pasted};
 
 pub struct VirtualKeyboard {
     dev: VirtualDevice,
@@ -49,8 +52,18 @@ impl VirtualKeyboard {
     }
 
     fn key(&mut self, code: KeyCode, down: bool) -> std::io::Result<()> {
-        self.dev
-            .emit(&[InputEvent::new(evdev::EventType::KEY.0, code.code(), down as i32)])
+        self.emit_key(code, down as i32)
+    }
+
+    /// Sends one key event (1 press, 0 release) as this keyboard.
+    pub fn emit_key(&mut self, code: KeyCode, value: i32) -> std::io::Result<()> {
+        self.dev.emit(&[InputEvent::new(evdev::EventType::KEY.0, code.code(), value)])
+    }
+
+    /// How long ago the device was created (compositors take a moment to
+    /// start listening to a new one).
+    pub fn age(&self) -> Duration {
+        self.created.elapsed()
     }
 
     /// Press `mods`, tap `key`, release `mods`.
@@ -103,27 +116,6 @@ impl VirtualKeyboard {
         }
         Ok(())
     }
-}
-
-/// Reads the current clipboard (or primary selection) as text, with a
-/// timeout so a hung source app can't stall dictation.
-fn read_selection(primary: bool) -> Option<String> {
-    let (tx, rx) = crossbeam_channel::bounded(1);
-    thread::spawn(move || {
-        let kind = if primary {
-            PasteClipboard::Primary
-        } else {
-            PasteClipboard::Regular
-        };
-        let result = paste::get_contents(kind, Seat::Unspecified, PasteMime::Text)
-            .ok()
-            .and_then(|(mut pipe, _)| {
-                let mut s = String::new();
-                pipe.read_to_string(&mut s).ok().map(|_| s)
-            });
-        let _ = tx.send(result);
-    });
-    rx.recv_timeout(Duration::from_millis(250)).ok().flatten()
 }
 
 fn set_selection(text: &str, kind: ClipboardType) -> anyhow::Result<()> {
@@ -251,9 +243,10 @@ impl LinuxInjector {
         set_selection(text, ClipboardType::Regular)
     }
 
-    pub fn insert(&mut self, text: &str, cfg: &InsertionConfig) -> anyhow::Result<()> {
+    pub fn insert(&mut self, pieces: &[String], cfg: &InsertionConfig, on_unread: &mut dyn FnMut()) -> anyhow::Result<Inserted> {
+        let text = pieces.concat();
         if text.is_empty() {
-            return Ok(());
+            return Ok(Inserted::Sent);
         }
         let clipboard = self.clipboard;
         let sink: &mut dyn KeySink = match self.keyboard.as_mut() {
@@ -270,55 +263,62 @@ impl LinuxInjector {
 
         match method {
             InsertMethod::Type => {
-                if sink.type_text(text)? {
-                    Ok(())
+                if sink.type_text(&text)? {
+                    Ok(Inserted::Sent)
                 } else if clipboard {
                     // Emoji / characters missing from the layout: paste instead.
-                    paste_text(sink, text, cfg)
+                    paste_text(sink, pieces, cfg, on_unread)
                 } else {
                     bail!("some characters can't be typed on this keyboard layout")
                 }
             }
-            _ => paste_text(sink, text, cfg),
+            _ => paste_text(sink, pieces, cfg, on_unread),
         }
     }
 }
 
-fn paste_text(sink: &mut dyn KeySink, text: &str, cfg: &InsertionConfig) -> anyhow::Result<()> {
-    let use_primary = cfg.paste_keys == PasteKeys::ShiftInsert;
-    let saved = cfg.restore_clipboard.then(|| {
-        (
-            read_selection(false),
-            if use_primary { read_selection(true) } else { None },
-        )
-    });
+/// The Wayland clipboard as [`LazyClipboard`]: text offers that report
+/// reads, on the clipboard and (for Shift+Insert) the primary selection.
+struct WaylandClipboard {
+    primary: bool,
+}
 
-    let kind = if use_primary {
-        ClipboardType::Both
-    } else {
-        ClipboardType::Regular
-    };
-    set_selection(text, kind)?;
-    // Let the compositor announce the new selection to the focused client.
-    thread::sleep(Duration::from_millis(40));
-    sink.paste_chord(cfg.paste_keys)?;
+impl LazyClipboard for WaylandClipboard {
+    type Saved = data_control::Saved;
+    const ASKS_EVERY_PASTE: bool = true;
 
-    if let Some((clip, primary)) = saved {
-        let ours = text.to_string();
-        // Restore after the target app has had time to read the paste.
-        thread::spawn(move || {
-            thread::sleep(Duration::from_millis(450));
-            // If the user copied something new meanwhile, leave it alone.
-            if read_selection(false).as_deref() != Some(ours.as_str()) {
-                return;
-            }
-            if let Some(prev) = clip.filter(|s| !s.is_empty()) {
-                let _ = set_selection(&prev, ClipboardType::Regular);
-            }
-            if let Some(prev) = primary.filter(|s| !s.is_empty()) {
-                let _ = set_selection(&prev, ClipboardType::Primary);
-            }
-        });
+    fn save(&mut self) -> Option<Self::Saved> {
+        data_control::save(self.primary)
     }
-    Ok(())
+
+    fn offer(&mut self, text: &str) -> anyhow::Result<Receiver<()>> {
+        let reads = data_control::offer_text(text, self.primary)?;
+        // Let the compositor announce the new selection to the focused client.
+        thread::sleep(Duration::from_millis(40));
+        Ok(reads)
+    }
+
+    fn still_ours(&mut self) -> bool {
+        data_control::still_ours()
+    }
+
+    fn restore(&mut self, saved: Self::Saved) {
+        data_control::restore(saved)
+    }
+}
+
+fn paste_text(
+    sink: &mut dyn KeySink,
+    pieces: &[String],
+    cfg: &InsertionConfig,
+    on_unread: &mut dyn FnMut(),
+) -> anyhow::Result<Inserted> {
+    let mut clipboard = WaylandClipboard {
+        primary: cfg.paste_keys == PasteKeys::ShiftInsert,
+    };
+    let pasted = lazy::paste_pieces(&mut clipboard, pieces, cfg.restore_clipboard, || sink.paste_chord(cfg.paste_keys), on_unread)?;
+    Ok(match pasted {
+        Pasted::Landed => Inserted::Landed,
+        Pasted::NotRead => Inserted::NotRead,
+    })
 }

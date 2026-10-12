@@ -1,8 +1,10 @@
 //! Global shortcut via a low-level keyboard hook (WH_KEYBOARD_LL). Keys are
-//! observed, not swallowed, and no special permission is needed.
+//! observed, and a few swallowed: Escape while recording (it cancels the
+//! dictation instead of also reaching the app), the key that finishes the
+//! shortcut, and keys pressed while a new shortcut is being recorded.
+//! Modifiers always pass, so none can get stuck. No permission is needed.
 
 use std::cell::RefCell;
-use std::collections::HashSet;
 use std::sync::Arc;
 use std::thread;
 
@@ -10,30 +12,32 @@ use crossbeam_channel::Sender;
 use parking_lot::Mutex;
 use windows::Win32::Foundation::{LPARAM, LRESULT, WPARAM};
 use windows::Win32::UI::Input::KeyboardAndMouse::{
-    INPUT, INPUT_0, INPUT_KEYBOARD, KEYBD_EVENT_FLAGS, KEYBDINPUT, KEYEVENTF_KEYUP, SendInput,
+    GetAsyncKeyState, INPUT, INPUT_0, INPUT_KEYBOARD, KEYBD_EVENT_FLAGS, KEYBDINPUT, KEYEVENTF_KEYUP, SendInput,
     VIRTUAL_KEY,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
-    CallNextHookEx, DispatchMessageW, GetMessageW, HHOOK, KBDLLHOOKSTRUCT, LLKHF_INJECTED, MSG,
-    SetWindowsHookExW, TranslateMessage, WH_KEYBOARD_LL, WM_KEYDOWN, WM_KEYUP, WM_SYSKEYDOWN,
-    WM_SYSKEYUP,
+    CallNextHookEx, DispatchMessageW, GetMessageW, HHOOK, KBDLLHOOKSTRUCT, LLKHF_INJECTED, MSG, SetTimer,
+    SetWindowsHookExW, TranslateMessage, WH_KEYBOARD_LL, WM_KEYDOWN, WM_KEYUP, WM_SYSKEYDOWN, WM_SYSKEYUP, WM_TIMER,
 };
 
 use super::keycodes::{VK_UNASSIGNED, WinKeys};
-use crate::hotkey::{Chord, ChordTracker, HotkeyEvent, Mods};
+use crate::hotkey::{
+    Chord, ChordTracker, FilterInput, HeldKeys, HotkeyEvent, KeyChange, KeyFilter, Mods, STALE_KEY_AGE, STALE_KEY_SWEEP,
+};
 
 #[derive(Default)]
 struct Shared {
     chord: Option<Chord>,
     capturing: bool,
-    held_mods: Mods,
+    recording: bool,
 }
 
 struct HookState {
     shared: Arc<Mutex<Shared>>,
     events: Sender<HotkeyEvent>,
-    pressed: HashSet<u32>,
+    held: HeldKeys,
     tracker: ChordTracker,
+    filter: KeyFilter,
 }
 
 thread_local! {
@@ -60,8 +64,9 @@ impl WinHotkeys {
                     *st.borrow_mut() = Some(HookState {
                         shared: s,
                         events,
-                        pressed: HashSet::new(),
+                        held: HeldKeys::default(),
                         tracker: ChordTracker::default(),
+                        filter: KeyFilter::default(),
                     })
                 });
                 let hook: HHOOK = match unsafe { SetWindowsHookExW(WH_KEYBOARD_LL, Some(hook_proc), None, 0) } {
@@ -73,10 +78,16 @@ impl WinHotkeys {
                 };
                 let _ = ready_tx.send(Ok(()));
                 let _ = hook;
+                // Checks for keys whose release was missed.
+                unsafe { SetTimer(None, 0, STALE_KEY_SWEEP.as_millis() as u32, None) };
                 // Low-level hooks are delivered through this thread's queue.
                 let mut msg = MSG::default();
                 unsafe {
                     while GetMessageW(&mut msg, None, 0, 0).as_bool() {
+                        if msg.message == WM_TIMER {
+                            sweep();
+                            continue;
+                        }
                         let _ = TranslateMessage(&msg);
                         DispatchMessageW(&msg);
                     }
@@ -97,10 +108,29 @@ impl WinHotkeys {
         self.shared.lock().capturing = on;
     }
 
-    pub fn mods_probe(&self) -> Arc<dyn Fn() -> Mods + Send + Sync> {
-        let shared = self.shared.clone();
-        Arc::new(move || shared.lock().held_mods)
+    pub fn set_recording(&self, on: bool) {
+        self.shared.lock().recording = on;
     }
+
+    /// Modifiers held right now, as Windows reports them.
+    pub fn mods_probe(&self) -> Arc<dyn Fn() -> Mods + Send + Sync> {
+        Arc::new(|| {
+            [
+                (0x10, Mods::SHIFT),
+                (0x11, Mods::CTRL),
+                (0x12, Mods::ALT),
+                (0x5B, Mods::SUPER),
+                (0x5C, Mods::SUPER),
+            ]
+            .into_iter()
+            .filter(|(vk, _)| key_is_down(*vk))
+            .fold(Mods::empty(), |a, (_, m)| a | m)
+        })
+    }
+}
+
+fn key_is_down(vk: u32) -> bool {
+    (unsafe { GetAsyncKeyState(vk as i32) } as u16 & 0x8000) != 0
 }
 
 unsafe extern "system" fn hook_proc(code: i32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
@@ -111,49 +141,88 @@ unsafe extern "system" fn hook_proc(code: i32, wparam: WPARAM, lparam: LPARAM) -
             let msg = wparam.0 as u32;
             let down = msg == WM_KEYDOWN || msg == WM_SYSKEYDOWN;
             let up = msg == WM_KEYUP || msg == WM_SYSKEYUP;
-            if down || up {
-                on_key(kb.vkCode, down);
+            if (down || up) && on_key(kb.vkCode, down) {
+                return LRESULT(1);
             }
         }
     }
     unsafe { CallNextHookEx(None, code, wparam, lparam) }
 }
 
-fn on_key(vk: u32, down: bool) {
+/// Returns whether to swallow the key.
+fn on_key(vk: u32, down: bool) -> bool {
+    STATE.with(|st| {
+        let mut guard = st.borrow_mut();
+        let Some(state) = guard.as_mut() else { return false };
+        // Autorepeat sends repeated key-downs; only the first counts.
+        let change = if !down {
+            state.held.release(vk);
+            KeyChange::Release
+        } else if state.held.press(vk) {
+            KeyChange::Press
+        } else {
+            KeyChange::Repeat
+        };
+        let (chord, capturing, recording) = {
+            let s = state.shared.lock();
+            (s.chord.clone(), s.capturing, s.recording)
+        };
+        let completed = match change {
+            KeyChange::Repeat => false,
+            KeyChange::Press => {
+                // Before the shortcut can fire: a key that has looked held
+                // a while may have been let go unseen (e.g. on the secure
+                // desktop of a UAC prompt).
+                let HookState { held, filter, .. } = &mut *state;
+                held.drop_stale(STALE_KEY_AGE, |k| filter.is_dropped(k) || key_is_down(k));
+                state.track(Some(vk), chord.as_ref(), capturing)
+            }
+            KeyChange::Release => state.track(None, chord.as_ref(), capturing),
+        };
+        let input = FilterInput {
+            chord: chord.as_ref(),
+            completed_chord: completed,
+            recording,
+            capturing,
+        };
+        state.filter.should_drop(&WinKeys, vk, change, &input)
+    })
+}
+
+/// Every few seconds: forget keys Windows says are up, so a shortcut whose
+/// release was missed still ends.
+fn sweep() {
     STATE.with(|st| {
         let mut guard = st.borrow_mut();
         let Some(state) = guard.as_mut() else { return };
-        // Autorepeat sends repeated key-downs; only the first counts.
-        let newly = if down {
-            state.pressed.insert(vk).then_some(vk)
-        } else {
-            state.pressed.remove(&vk);
-            None
-        };
-        if down && newly.is_none() {
+        let HookState { held, filter, .. } = &mut *state;
+        if held.drop_stale(STALE_KEY_AGE, |k| filter.is_dropped(k) || key_is_down(k)).is_empty() {
             return;
         }
         let (chord, capturing) = {
             let s = state.shared.lock();
             (s.chord.clone(), s.capturing)
         };
-        let (events, mods) = state
-            .tracker
-            .update(&WinKeys, &state.pressed, newly, chord.as_ref(), capturing);
-        {
-            let mut s = state.shared.lock();
-            s.held_mods = mods;
-            if events.iter().any(|e| matches!(e, HotkeyEvent::Captured(_))) {
-                s.capturing = false;
-            }
+        state.track(None, chord.as_ref(), capturing);
+    });
+}
+
+impl HookState {
+    /// Runs the tracker; returns whether this press completed the shortcut.
+    fn track(&mut self, newly: Option<u32>, chord: Option<&Chord>, capturing: bool) -> bool {
+        let (events, _mods) = self.tracker.update(&WinKeys, &self.held.keys, newly, chord, capturing);
+        if events.iter().any(|e| matches!(e, HotkeyEvent::Captured(_))) {
+            self.shared.lock().capturing = false;
         }
+        let completed = events.contains(&HotkeyEvent::Down);
         for ev in events {
-            if ev == HotkeyEvent::Down && chord.as_ref().is_some_and(|c| c.mods.contains(Mods::SUPER)) {
+            if ev == HotkeyEvent::Down && chord.is_some_and(|c| c.mods.contains(Mods::SUPER)) {
                 suppress_start_menu();
             }
-            let _ = state.events.send(ev);
+            let _ = self.events.send(ev);
         }
-    });
+        completed
+    }
 }
 
 /// Releasing the Windows key after using it alone opens the Start menu. A

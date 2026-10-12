@@ -32,6 +32,8 @@ pub struct Notice {
 pub enum StateEvent {
     PhaseChanged(Phase),
     Notice,
+    /// A paste landed nowhere; `AppState::paste_failed` has the text.
+    PasteFailed,
     ThemeChanged,
 }
 
@@ -54,6 +56,10 @@ pub struct AppState {
     pub capturing: bool,
     pub capture_error: Option<String>,
     pub notice: Option<Notice>,
+    /// The text of the last paste that landed nowhere, to copy.
+    pub paste_failed: Option<String>,
+    /// macOS: the app whose Secure Keyboard Entry blocks the shortcut.
+    pub secure_input: Option<String>,
     pub devices: Vec<InputDevice>,
     /// The latest dictation's text and how many finished this session
     /// (kept even when history isn't saved).
@@ -85,6 +91,8 @@ impl AppState {
             capturing: false,
             capture_error: None,
             notice: None,
+            paste_failed: None,
+            secure_input: None,
             // Filled in off the UI thread (see refresh_devices).
             devices: Vec::new(),
             last_transcript: None,
@@ -226,6 +234,11 @@ impl AppState {
                 });
                 cx.emit(StateEvent::Notice);
             }
+            Event::PasteFailed(text) => {
+                self.paste_failed = Some(text);
+                cx.emit(StateEvent::PasteFailed);
+            }
+            Event::SecureInput(app) => self.secure_input = app,
             Event::Config(cfg) => self.config = *cfg,
         }
         cx.notify();

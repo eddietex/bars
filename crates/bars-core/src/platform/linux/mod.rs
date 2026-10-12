@@ -1,3 +1,5 @@
+pub mod atspi;
+pub mod data_control;
 pub mod doctor;
 pub mod evdev_hotkeys;
 pub mod inject;

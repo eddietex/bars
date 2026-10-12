@@ -152,8 +152,15 @@ pub struct InsertionConfig {
     pub paste_keys: PasteKeys,
     /// Put the previous clipboard contents back after pasting.
     pub restore_clipboard: bool,
-    /// Append a space so consecutive dictations flow together.
+    /// Append a space so consecutive dictations flow together (with smart
+    /// spacing: only at the end of a line).
     pub trailing_space: bool,
+    /// Read the text around the cursor (accessibility) to fit spacing,
+    /// capitalization and the final full stop into the sentence.
+    pub smart_spacing: bool,
+    /// Paste long text into Claude Code or Codex in pieces, so it shows as
+    /// text instead of "[Pasted text]".
+    pub split_for_agents: bool,
 }
 
 impl Default for InsertionConfig {
@@ -163,6 +170,8 @@ impl Default for InsertionConfig {
             paste_keys: PasteKeys::default(),
             restore_clipboard: true,
             trailing_space: true,
+            smart_spacing: true,
+            split_for_agents: true,
         }
     }
 }

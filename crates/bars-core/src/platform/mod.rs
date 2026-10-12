@@ -6,10 +6,13 @@
 pub mod linux;
 #[cfg(target_os = "macos")]
 pub mod mac;
+pub mod focus;
 #[cfg(any(target_os = "windows", target_os = "macos"))]
 mod native_doctor;
 #[cfg(any(target_os = "windows", target_os = "macos"))]
 pub mod native_inject;
+pub mod paste;
+mod procs;
 pub mod requirements;
 #[cfg(target_os = "windows")]
 pub mod win;
@@ -141,6 +144,27 @@ pub fn hotkey_access_granted() -> bool {
     }
 }
 
+/// The app holding Secure Keyboard Entry (macOS), which keeps every other
+/// app, Bars included, from seeing keys. None when off, or held by the
+/// login window (the lock screen).
+pub fn secure_input_owner() -> Option<String> {
+    #[cfg(target_os = "macos")]
+    {
+        mac::secure_input::owner()
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        None
+    }
+}
+
+/// Starts what reading the focused field needs, ahead of the first
+/// dictation (Linux: following focus over the accessibility bus).
+pub fn prepare_focus_reading() {
+    #[cfg(target_os = "linux")]
+    linux::atspi::warm_up();
+}
+
 /// The active global-hotkey backend.
 pub enum Hotkeys {
     #[cfg(target_os = "linux")]
@@ -270,6 +294,22 @@ impl Hotkeys {
         }
     }
 
+    /// Tells the backend a dictation is recording (and whether hands-free),
+    /// so Escape cancels it without also reaching the app.
+    pub fn set_recording(&self, on: bool, hands_free: bool) {
+        match self {
+            #[cfg(target_os = "linux")]
+            Hotkeys::Evdev(h) => h.set_recording(on, hands_free),
+            #[cfg(target_os = "windows")]
+            Hotkeys::Windows(h) => h.set_recording(on),
+            #[cfg(target_os = "macos")]
+            Hotkeys::Mac(h) => h.set_recording(on),
+            _ => {
+                let _ = (on, hands_free);
+            }
+        }
+    }
+
     pub fn set_capture(&self, on: bool) {
         match self {
             #[cfg(target_os = "linux")]
@@ -301,6 +341,17 @@ impl Hotkeys {
     pub fn held_mods(&self) -> Option<Mods> {
         self.mods_probe().map(|f| f())
     }
+}
+
+/// How an insertion went.
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub enum Inserted {
+    /// Pasted, and an app read the text.
+    Landed,
+    /// Typed, or pasted where reads can't be seen.
+    Sent,
+    /// Pasted, but nothing read it: no text field had focus.
+    NotRead,
 }
 
 /// Inserts text into the focused application.
@@ -343,15 +394,33 @@ impl Injector {
         self.inner.remember_target();
     }
 
-    pub fn insert(&mut self, text: &str, cfg: &InsertionConfig) -> anyhow::Result<()> {
+    /// Inserts `pieces` one after another (one piece, unless a long text
+    /// was split for a terminal agent). `on_unread` is called as soon as a
+    /// paste is known not to have landed.
+    pub fn insert(&mut self, pieces: &[String], cfg: &InsertionConfig, on_unread: &mut dyn FnMut()) -> anyhow::Result<Inserted> {
         #[cfg(any(target_os = "linux", target_os = "windows", target_os = "macos"))]
         {
-            self.inner.insert(text, cfg)
+            self.inner.insert(pieces, cfg, on_unread)
         }
         #[cfg(not(any(target_os = "linux", target_os = "windows", target_os = "macos")))]
         {
-            let _ = (text, cfg);
+            let _ = (pieces, cfg, on_unread);
             anyhow::bail!("text insertion is not implemented on this platform yet")
+        }
+    }
+
+    /// Whether insertion must wait for the user to let go of the shortcut,
+    /// so its keys don't combine with ours. macOS pastes with the Command
+    /// flag set on the key itself, which held keys can't change.
+    pub fn waits_for_released_keys(&self, cfg: &InsertionConfig) -> bool {
+        #[cfg(target_os = "macos")]
+        {
+            cfg.method == crate::config::InsertMethod::Type
+        }
+        #[cfg(not(target_os = "macos"))]
+        {
+            let _ = cfg;
+            true
         }
     }
 

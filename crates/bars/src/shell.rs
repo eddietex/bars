@@ -132,6 +132,15 @@ impl Shell {
                     }
                 }
             }
+            // Stays up longer: it offers the text to copy.
+            StateEvent::PasteFailed => {
+                if overlay_enabled {
+                    self.show_overlay(cx);
+                    if self.state.read(cx).phase == Phase::Idle {
+                        self.schedule_overlay_close(crate::overlay::PASTE_FAILED_FOR + Duration::from_millis(600), cx);
+                    }
+                }
+            }
             StateEvent::ThemeChanged => self.apply_theme(cx),
         }
         let needs = {

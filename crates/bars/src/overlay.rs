@@ -32,6 +32,12 @@ const SURFACE: Size<Pixels> = Size {
 const SCREEN_MARGIN: f32 = 12.;
 const PILL_H: f32 = 36.;
 const BARS: usize = 13;
+/// How long a notice stays on the pill.
+const MESSAGE_FOR: Duration = Duration::from_millis(2600);
+/// "Select a text box first" stays longer: it offers the text to copy.
+pub const PASTE_FAILED_FOR: Duration = Duration::from_millis(6000);
+/// Room for the Copy button.
+const COPY_BUTTON_W: f32 = 64.;
 
 #[derive(Clone, Copy, PartialEq, Debug)]
 enum Visual {
@@ -50,6 +56,10 @@ pub struct Overlay {
     changed_at: Instant,
     from_width: f32,
     message: Option<(SharedString, NoticeKind, Instant)>,
+    /// How long the current message stays.
+    message_for: Duration,
+    /// Text the message offers to copy (a paste that landed nowhere).
+    copy_text: Option<SharedString>,
     input_region: Option<Bounds<Pixels>>,
     /// Moved to the active screen for the current appearance.
     #[cfg(not(target_os = "linux"))]
@@ -73,10 +83,16 @@ impl Overlay {
                     if let Some(n) = state.read(cx).notice.clone() {
                         // Only surface short, glanceable notices here.
                         if n.text.len() <= 64 {
-                            this.message = Some((n.text, n.kind, Instant::now()));
-                            this.set_visual(Visual::Message);
+                            this.show_message(n.text, n.kind, MESSAGE_FOR, None);
                             cx.notify();
                         }
+                    }
+                }
+                StateEvent::PasteFailed => {
+                    if let Some(text) = state.read(cx).paste_failed.clone() {
+                        let copy = Some(SharedString::from(text));
+                        this.show_message("Select a text box first".into(), NoticeKind::Warning, PASTE_FAILED_FOR, copy);
+                        cx.notify();
                     }
                 }
                 StateEvent::ThemeChanged => {}
@@ -90,6 +106,8 @@ impl Overlay {
             changed_at: Instant::now(),
             from_width: 0.0,
             message: None,
+            message_for: MESSAGE_FOR,
+            copy_text: None,
             input_region: None,
             #[cfg(not(target_os = "linux"))]
             placed: false,
@@ -107,6 +125,13 @@ impl Overlay {
         this
     }
 
+    fn show_message(&mut self, text: SharedString, kind: NoticeKind, lasts: Duration, copy: Option<SharedString>) {
+        self.message = Some((text, kind, Instant::now()));
+        self.message_for = lasts;
+        self.copy_text = copy;
+        self.set_visual(Visual::Message);
+    }
+
     fn set_visual(&mut self, v: Visual) {
         if self.visual != v {
             self.from_width = self.current_width();
@@ -118,7 +143,7 @@ impl Overlay {
     fn sync(&mut self, phase: Phase) {
         let v = match phase {
             Phase::Idle => {
-                if self.message.as_ref().is_some_and(|m| m.2.elapsed() < Duration::from_millis(2600)) {
+                if self.message.as_ref().is_some_and(|m| m.2.elapsed() < self.message_for) {
                     Visual::Message
                 } else {
                     Visual::Hidden
@@ -130,6 +155,7 @@ impl Overlay {
         };
         if v != Visual::Message {
             self.message = None;
+            self.copy_text = None;
         }
         if matches!(v, Visual::Listening) && self.visual == Visual::Hidden {
             self.levels.iter_mut().for_each(|l| *l = 0.0);
@@ -160,7 +186,8 @@ impl Overlay {
             Visual::Thinking => 92.,
             Visual::Message => {
                 let len = self.message.as_ref().map_or(0, |m| m.0.len());
-                (len as f32 * 7.0 + 56.).clamp(160., 420.)
+                let button = if self.copy_text.is_some() { COPY_BUTTON_W } else { 0. };
+                (len as f32 * 7.0 + 56. + button).clamp(160., 420.)
             }
         }
     }
@@ -207,7 +234,7 @@ impl Render for Overlay {
         let animating = self.changed_at.elapsed() < Duration::from_millis(260);
         // Expire messages.
         if self.visual == Visual::Message
-            && self.message.as_ref().is_none_or(|m| m.2.elapsed() > Duration::from_millis(2600))
+            && self.message.as_ref().is_none_or(|m| m.2.elapsed() > self.message_for)
         {
             self.message = None;
             let phase = self.state.read(cx).phase;
@@ -317,14 +344,41 @@ impl Render for Overlay {
                     NoticeKind::Warning => rgb(0xffcf7a).into(),
                     NoticeKind::Info => hsla(0., 0., 1., 0.92),
                 };
-                div()
-                    .px(px(16.))
+                let label = div()
                     .text_size(px(12.5))
                     .font_weight(FontWeight::MEDIUM)
                     .text_color(tint)
                     .whitespace_nowrap()
-                    .child(text)
-                    .into_any_element()
+                    .child(text);
+                match self.copy_text.clone() {
+                    None => div().px(px(16.)).child(label).into_any_element(),
+                    Some(copy) => {
+                        let s = state.clone();
+                        h_row()
+                            .pl(px(16.))
+                            .pr(px(6.))
+                            .gap(px(10.))
+                            .child(label)
+                            .child(
+                                div()
+                                    .id("copy-text")
+                                    .h(px(24.))
+                                    .px(px(12.))
+                                    .flex()
+                                    .items_center()
+                                    .rounded_full()
+                                    .bg(hsla(0., 0., 1., 0.14))
+                                    .cursor_pointer()
+                                    .hover(|el| el.bg(hsla(0., 0., 1., 0.22)))
+                                    .text_size(px(12.))
+                                    .font_weight(FontWeight::SEMIBOLD)
+                                    .text_color(white)
+                                    .child("Copy")
+                                    .on_click(move |_, _, cx| s.read(cx).send(Command::CopyText(copy.to_string()))),
+                            )
+                            .into_any_element()
+                    }
+                }
             }
         };
 

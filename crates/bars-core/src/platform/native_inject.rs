@@ -1,18 +1,23 @@
 //! Text insertion on Windows and macOS: the clipboard plus the platform's
 //! paste shortcut (Ctrl+V / Cmd+V), or typing through synthetic key events.
+//! Pasted text is offered lazily, which tells whether an app took it.
 
+#[cfg(target_os = "windows")]
 use std::thread;
+#[cfg(target_os = "windows")]
 use std::time::Duration;
 
 use anyhow::anyhow;
 use arboard::Clipboard;
 use enigo::{Direction, Enigo, Key, Keyboard, Settings};
 
+use super::Inserted;
+use super::paste::{Pasted, paste_pieces};
 use crate::config::{InsertMethod, InsertionConfig};
 
 /// Runs keyboard simulation where the platform allows it: macOS aborts the
-/// app when keyboard layouts (needed to find the key for "v", or to type)
-/// are looked up off the main thread; elsewhere any thread works.
+/// app when keyboard layouts (needed to type) are looked up off the main
+/// thread; elsewhere any thread works.
 fn on_input_thread<R>(f: impl FnOnce() -> R) -> R {
     #[cfg(target_os = "macos")]
     {
@@ -24,17 +29,16 @@ fn on_input_thread<R>(f: impl FnOnce() -> R) -> R {
     }
 }
 
-#[cfg(target_os = "macos")]
-const PASTE_MODIFIER: Key = Key::Meta;
-#[cfg(not(target_os = "macos"))]
-const PASTE_MODIFIER: Key = Key::Control;
-
 pub struct NativeInjector {
     enigo: Option<Enigo>,
     error: Option<String>,
     /// The window that had focus when dictation started (Windows).
     #[cfg(target_os = "windows")]
     target: Option<isize>,
+    #[cfg(target_os = "macos")]
+    clipboard: super::mac::paste::Pasteboard,
+    #[cfg(target_os = "windows")]
+    clipboard: super::win::clipboard::WinClipboard,
 }
 
 impl NativeInjector {
@@ -56,6 +60,7 @@ impl NativeInjector {
             error,
             #[cfg(target_os = "windows")]
             target: None,
+            clipboard: Default::default(),
         }
     }
 
@@ -97,24 +102,39 @@ impl NativeInjector {
         Ok(())
     }
 
-    pub fn insert(&mut self, text: &str, cfg: &InsertionConfig) -> anyhow::Result<()> {
+    pub fn insert(&mut self, pieces: &[String], cfg: &InsertionConfig, on_unread: &mut dyn FnMut()) -> anyhow::Result<Inserted> {
+        let text = pieces.concat();
         if text.is_empty() {
-            return Ok(());
+            return Ok(Inserted::Sent);
         }
         #[cfg(target_os = "windows")]
         self.restore_target();
         let Some(enigo) = self.enigo.as_mut() else {
             // Still useful: leave the text on the clipboard.
-            Clipboard::new()?.set_text(text.to_string())?;
+            Clipboard::new()?.set_text(text)?;
             anyhow::bail!(
                 "copied to clipboard ({})",
                 self.error.as_deref().unwrap_or("keyboard simulation unavailable")
             );
         };
-        match cfg.method {
-            InsertMethod::Type => on_input_thread(|| type_text(enigo, text)),
-            InsertMethod::Auto | InsertMethod::Paste => paste_text(enigo, text, cfg),
+        if cfg.method == InsertMethod::Type {
+            on_input_thread(|| type_text(enigo, &text))?;
+            return Ok(Inserted::Sent);
         }
+        #[cfg(target_os = "macos")]
+        let press = super::mac::paste::press_paste;
+        #[cfg(target_os = "windows")]
+        let press = || {
+            enigo.key(Key::Control, Direction::Press).map_err(key_err)?;
+            let tapped = enigo.key(Key::Unicode('v'), Direction::Click).map_err(key_err);
+            enigo.key(Key::Control, Direction::Release).map_err(key_err)?;
+            tapped
+        };
+        let pasted = paste_pieces(&mut self.clipboard, pieces, cfg.restore_clipboard, press, on_unread)?;
+        Ok(match pasted {
+            Pasted::Landed => Inserted::Landed,
+            Pasted::NotRead => Inserted::NotRead,
+        })
     }
 }
 
@@ -126,33 +146,6 @@ impl Default for NativeInjector {
 
 fn key_err(e: enigo::InputError) -> anyhow::Error {
     anyhow!("sending keys failed: {e}")
-}
-
-fn paste_text(enigo: &mut Enigo, text: &str, cfg: &InsertionConfig) -> anyhow::Result<()> {
-    let mut clipboard = Clipboard::new()?;
-    let saved = if cfg.restore_clipboard { clipboard.get_text().ok() } else { None };
-    clipboard.set_text(text.to_string())?;
-    thread::sleep(Duration::from_millis(30));
-
-    on_input_thread(|| {
-        enigo.key(PASTE_MODIFIER, Direction::Press).map_err(key_err)?;
-        let tapped = enigo.key(Key::Unicode('v'), Direction::Click).map_err(key_err);
-        enigo.key(PASTE_MODIFIER, Direction::Release).map_err(key_err)?;
-        tapped
-    })?;
-
-    if let Some(previous) = saved {
-        let ours = text.to_string();
-        thread::spawn(move || {
-            thread::sleep(Duration::from_millis(450));
-            let Ok(mut cb) = Clipboard::new() else { return };
-            // Leave it alone if the user copied something new meanwhile.
-            if cb.get_text().ok().as_deref() == Some(ours.as_str()) {
-                let _ = cb.set_text(previous);
-            }
-        });
-    }
-    Ok(())
 }
 
 fn type_text(enigo: &mut Enigo, text: &str) -> anyhow::Result<()> {

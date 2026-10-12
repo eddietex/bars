@@ -16,7 +16,7 @@ on the CPU with ONNX Runtime.
 | --- | --- |
 | **Hold** `Ctrl` + `Super` | Talk; release to insert the text |
 | **Double-tap** `Ctrl` + `Super` | Hands-free: keep talking, tap again to insert |
-| `Esc` while recording | Cancel |
+| `Esc` while recording | Cancel (the app doesn't also get the `Esc`) |
 | Tray menu → *Paste last transcript* | Re-insert the last dictation |
 | `bars --toggle` | Start/stop from any custom key binding or script |
 
@@ -25,6 +25,15 @@ insertion method, model and more are in the settings window (click the tray
 icon). Say **"new line"** or **"new paragraph"** to break lines; filler words
 ("um", "uh") are removed; the Dictionary page holds word replacements and
 spoken snippets.
+
+Bars reads the text around the cursor through the accessibility API, to add
+a space only where one is needed, continue a sentence in lowercase and drop
+the full stop when the sentence carries on (on Linux this works in apps with
+accessibility support, such as GTK apps). Long text pasted into Claude Code
+or Codex goes in pieces, so it shows as text instead of "[Pasted text]". If
+no text box had focus, the pill says so and offers the text to copy. Pasted
+text is kept out of clipboard-history apps, and everything you had copied
+(images and files too) comes back afterwards.
 
 ## Speech models
 
@@ -135,9 +144,12 @@ crates/bars-core   engine, audio, hotkeys, text injection, config, history
   src/engine.rs       model worker thread (transcribe-rs / ONNX Runtime)
   src/audio.rs        cpal capture (PulseAudio/PipeWire), resampling, cues
   src/text.rs         filler removal, dictionary, snippets, voice commands
-  src/platform/       OS backends: linux/ (evdev, uinput, portals, clipboard),
-                      win/ (keyboard hook), mac/ (event tap, TCC permissions),
-                      native_inject.rs (Windows/macOS paste + typing)
+  src/platform/       OS backends: linux/ (evdev, uinput, portals, data-control
+                      clipboard, AT-SPI), win/ (keyboard hook, clipboard, UI
+                      Automation), mac/ (event tap, pasteboard, accessibility,
+                      TCC permissions), native_inject.rs (Windows/macOS paste
+                      + typing), paste.rs (paste-and-confirm, shared),
+                      focus.rs (focused app and field text)
 crates/bars        GPUI app: tray, overlay pill, settings window
   src/overlay_native.rs  Windows/macOS pill: click-through, active screen, blur (macOS)
   src/ipc_*.rs          single instance + CLI (D-Bus on Linux, local socket elsewhere)

@@ -13,6 +13,11 @@ const MODIFIER_ONLY_HINT: &str = "Works in every app. Modifier-only shortcuts li
 const MODIFIER_ONLY_HINT: &str = "Works in every app. Modifier-only shortcuts like Ctrl + Win never type anything.";
 #[cfg(not(any(target_os = "macos", target_os = "windows")))]
 const MODIFIER_ONLY_HINT: &str = "Works in every app. Modifier-only shortcuts like Ctrl + Super never type anything.";
+
+#[cfg(target_os = "linux")]
+const SMART_SPACING_HINT: &str = "Reads the text around the cursor to add spaces, match capitalization and drop a final full stop mid-sentence. Works in apps with accessibility support (most GTK apps). Nothing is stored.";
+#[cfg(not(target_os = "linux"))]
+const SMART_SPACING_HINT: &str = "Reads the text around the cursor to add spaces, match capitalization and drop a final full stop mid-sentence. Nothing is stored.";
 use crate::theme::PaletteExt;
 use crate::widgets::*;
 
@@ -37,6 +42,7 @@ impl SettingsView {
                 ))
             }));
         let hotkeys_ok = st.hotkeys_active;
+        let secure_input = st.secure_input.clone();
         let desktop_shortcut = st.desktop_shortcut;
         let shortcut_parts = st.shortcut_parts();
         let state = self.state.clone();
@@ -177,6 +183,19 @@ impl SettingsView {
                                         .child(globe_link),
                                 )
                             })
+                            .when_some(secure_input, |el, app| {
+                                el.child(
+                                    div()
+                                        .px(px(18.))
+                                        .pb(px(12.))
+                                        .text_size(px(12.5))
+                                        .text_color(p.warning)
+                                        .child(format!(
+                                            "{app} has Secure Keyboard Entry on, which hides your keys from Bars. \
+                                             Turn it off there (Terminal: Terminal menu › Secure Keyboard Entry), or switch apps."
+                                        )),
+                                )
+                            })
                             .when(!hotkeys_ok, |el| {
                                 el.child(
                                     div()
@@ -287,13 +306,43 @@ impl SettingsView {
                         )
                         .into_any_element(),
                         row(
+                            "Fit to the surrounding text",
+                            Some(SMART_SPACING_HINT),
+                            small_switch("smart-spacing", cfg.insertion.smart_spacing, {
+                                let set = set.clone();
+                                move |v, _, cx| {
+                                    let v = *v;
+                                    set(cx, Box::new(move |c| c.insertion.smart_spacing = v))
+                                }
+                            }),
+                            p,
+                        )
+                        .into_any_element(),
+                        row(
                             "Add a space after",
-                            Some("So back-to-back dictations read as one sentence flow."),
+                            Some(if cfg.insertion.smart_spacing {
+                                "At the end of a line, so back-to-back dictations read as one sentence."
+                            } else {
+                                "So back-to-back dictations read as one sentence flow."
+                            }),
                             small_switch("trailing", cfg.insertion.trailing_space, {
                                 let set = set.clone();
                                 move |v, _, cx| {
                                     let v = *v;
                                     set(cx, Box::new(move |c| c.insertion.trailing_space = v))
+                                }
+                            }),
+                            p,
+                        )
+                        .into_any_element(),
+                        row(
+                            "Split long pastes for Claude Code and Codex",
+                            Some("In a terminal running either, long text is pasted in pieces so it shows as text instead of “[Pasted text]”."),
+                            small_switch("split-agents", cfg.insertion.split_for_agents, {
+                                let set = set.clone();
+                                move |v, _, cx| {
+                                    let v = *v;
+                                    set(cx, Box::new(move |c| c.insertion.split_for_agents = v))
                                 }
                             }),
                             p,

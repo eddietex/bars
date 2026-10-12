@@ -1,39 +1,86 @@
-//! Global shortcut via a listen-only Quartz event tap. Requires
-//! Accessibility (or Input Monitoring, which also allows listening).
+//! Global shortcut via a Quartz event tap. With Accessibility the tap can
+//! drop events: Escape while recording (it cancels the dictation instead
+//! of also closing a dialog in the app), the key that finishes the
+//! shortcut, keys pressed while a new shortcut is being recorded, and
+//! Fn/Globe when Fn alone is the shortcut (so macOS doesn't also open the
+//! emoji picker or switch input source). With only Input Monitoring it
+//! falls back to listening.
 
-use std::collections::HashSet;
+use std::cell::RefCell;
+use std::ffi::c_void;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::thread;
 
 use core_foundation::base::TCFType;
 use core_foundation::mach_port::CFMachPortRef;
-use core_foundation::runloop::{CFRunLoop, kCFRunLoopCommonModes};
+use core_foundation::runloop::{CFRunLoop, CFRunLoopTimer, CFRunLoopTimerRef, kCFRunLoopCommonModes};
 use core_graphics::event::{
-    CGEventFlags, CGEventTap, CGEventTapLocation, CGEventTapOptions, CGEventTapPlacement,
-    CGEventType, CallbackResult, EventField,
+    CGEvent, CGEventFlags, CGEventTap, CGEventTapLocation, CGEventTapOptions, CGEventTapPlacement, CGEventType,
+    CallbackResult, EventField,
 };
 use crossbeam_channel::Sender;
 use parking_lot::Mutex;
 
-use super::keycodes::{MODIFIERS, MacKeys};
-use crate::hotkey::{Chord, ChordTracker, HotkeyEvent, KeyMap, Mods};
+use super::keycodes::{KVK_GLOBE, MODIFIERS, MacKeys};
+use crate::hotkey::{
+    Chord, ChordTracker, FilterInput, HeldKeys, HotkeyEvent, KeyChange, KeyFilter, KeyMap, Mods, STALE_KEY_AGE,
+    STALE_KEY_SWEEP,
+};
 
 #[link(name = "CoreGraphics", kind = "framework")]
 unsafe extern "C" {
     fn CGEventTapEnable(tap: CFMachPortRef, enable: bool);
+    fn CGEventSourceKeyState(state: i32, key: u16) -> bool;
+    fn CGEventSourceFlagsState(state: i32) -> u64;
 }
+
+#[link(name = "CoreFoundation", kind = "framework")]
+unsafe extern "C" {
+    fn CFAbsoluteTimeGetCurrent() -> f64;
+}
+
+/// kCGEventSourceStateHIDSystemState: the keyboard as the hardware reports it.
+const HID_STATE: i32 = 1;
+
+/// Marks events Bars posts itself (typing, the paste keystroke), which the
+/// tap ignores. enigo tags its events with the same value.
+pub const SYNTHETIC_MARKER: i64 = enigo::EVENT_MARKER as i64;
 
 #[derive(Default)]
 struct Shared {
     chord: Option<Chord>,
     capturing: bool,
-    held_mods: Mods,
+    recording: bool,
 }
 
 struct TapState {
-    pressed: HashSet<u32>,
+    held: HeldKeys,
     tracker: ChordTracker,
+    filter: KeyFilter,
+}
+
+struct Tap {
+    state: Mutex<TapState>,
+    shared: Arc<Mutex<Shared>>,
+    events: Sender<HotkeyEvent>,
+    /// The tap's port, for switching it back on from its callback.
+    port: AtomicUsize,
+    /// The tap can drop events (it's active, not listen-only).
+    active: AtomicBool,
+}
+
+thread_local! {
+    // The sweep timer fires on the tap's thread.
+    static SWEPT: RefCell<Option<Arc<Tap>>> = const { RefCell::new(None) };
+}
+
+extern "C" fn on_sweep_timer(_timer: CFRunLoopTimerRef, _info: *mut c_void) {
+    SWEPT.with(|t| {
+        if let Some(tap) = t.borrow().as_ref() {
+            tap.sweep();
+        }
+    });
 }
 
 pub struct MacHotkeys {
@@ -52,103 +99,60 @@ impl MacHotkeys {
             ..Default::default()
         }));
         let (ready_tx, ready_rx) = crossbeam_channel::bounded::<Result<(), String>>(1);
-        let s = shared.clone();
+        let tap = Arc::new(Tap {
+            state: Mutex::new(TapState {
+                held: HeldKeys::default(),
+                tracker: ChordTracker::default(),
+                filter: KeyFilter::default(),
+            }),
+            shared: shared.clone(),
+            events,
+            port: AtomicUsize::new(0),
+            active: AtomicBool::new(false),
+        });
         thread::Builder::new()
             .name("bars-hotkeys".into())
             .spawn(move || {
-                let state = Mutex::new(TapState {
-                    pressed: HashSet::new(),
-                    tracker: ChordTracker::default(),
-                });
-                // The tap's port, for switching it back on from its callback.
-                let port = Arc::new(AtomicUsize::new(0));
-                let tap_port = port.clone();
-                let tap = CGEventTap::new(
-                    CGEventTapLocation::Session,
-                    CGEventTapPlacement::HeadInsertEventTap,
-                    CGEventTapOptions::ListenOnly,
-                    vec![CGEventType::KeyDown, CGEventType::KeyUp, CGEventType::FlagsChanged],
-                    move |_proxy, etype, event| {
-                        // macOS switches taps off when a callback is slow, and
-                        // while a password field has secure input (System
-                        // Settings asks for one when toggling permissions).
-                        // Without this the shortcut stays dead until restart.
-                        if matches!(etype, CGEventType::TapDisabledByTimeout | CGEventType::TapDisabledByUserInput) {
-                            log::info!("keyboard event tap was disabled by macOS ({etype:?}); re-enabling");
-                            let mut st = state.lock();
-                            // Keys may have changed while we weren't listening.
-                            st.pressed.clear();
-                            st.tracker = ChordTracker::default();
-                            let p = tap_port.load(Ordering::Acquire);
-                            if p != 0 {
-                                unsafe { CGEventTapEnable(p as CFMachPortRef, true) };
-                            }
-                            return CallbackResult::Keep;
-                        }
-                        let code = event.get_integer_value_field(EventField::KEYBOARD_EVENT_KEYCODE) as u32;
-                        let repeat = event.get_integer_value_field(EventField::KEYBOARD_EVENT_AUTOREPEAT) != 0;
-                        let flags = event.get_flags();
-                        let mut st = state.lock();
-                        let newly = match etype {
-                            CGEventType::KeyDown if !repeat => st.pressed.insert(code).then_some(code),
-                            CGEventType::KeyDown => return CallbackResult::Keep,
-                            CGEventType::KeyUp => {
-                                st.pressed.remove(&code);
-                                None
-                            }
-                            // Caps Lock also reports through here, but only when it
-                            // toggles: tracked as a key it would look held while
-                            // it's on, blocking the shortcut and shortcut recording.
-                            CGEventType::FlagsChanged if MacKeys.modifier_of(code).is_none() => {
-                                return CallbackResult::Keep;
-                            }
-                            CGEventType::FlagsChanged => {
-                                // A modifier changed; which way is told by the flags.
-                                let was_down = st.pressed.contains(&code);
-                                let down = modifier_down(code, flags, was_down);
-                                if down {
-                                    st.pressed.insert(code);
-                                } else {
-                                    st.pressed.remove(&code);
-                                }
-                                sync_modifiers(&mut st.pressed, flags);
-                                (down && !was_down).then_some(code)
-                            }
-                            _ => return CallbackResult::Keep,
-                        };
-                        let (chord, capturing) = {
-                            let sh = s.lock();
-                            (sh.chord.clone(), sh.capturing)
-                        };
-                        let TapState { pressed, tracker } = &mut *st;
-                        let (events_out, mods) = tracker.update(&MacKeys, pressed, newly, chord.as_ref(), capturing);
-                        {
-                            let mut sh = s.lock();
-                            sh.held_mods = mods;
-                            if events_out.iter().any(|e| matches!(e, HotkeyEvent::Captured(_))) {
-                                sh.capturing = false;
-                            }
-                        }
-                        for ev in events_out {
-                            let _ = events.send(ev);
-                        }
-                        CallbackResult::Keep
-                    },
-                );
-                let tap = match tap {
+                let create = |options| {
+                    let t = tap.clone();
+                    CGEventTap::new(
+                        CGEventTapLocation::Session,
+                        CGEventTapPlacement::HeadInsertEventTap,
+                        options,
+                        vec![CGEventType::KeyDown, CGEventType::KeyUp, CGEventType::FlagsChanged],
+                        move |_proxy, etype, event| t.on_event(etype, event),
+                    )
+                };
+                let (cg_tap, active) = match create(CGEventTapOptions::Default) {
+                    Ok(t) => (Ok(t), true),
+                    // Input Monitoring alone only allows listening.
+                    Err(()) => (create(CGEventTapOptions::ListenOnly), false),
+                };
+                let cg_tap = match cg_tap {
                     Ok(t) => t,
                     Err(()) => {
                         let _ = ready_tx.send(Err("could not create the keyboard event tap".into()));
                         return;
                     }
                 };
-                port.store(tap.mach_port().as_concrete_TypeRef() as usize, Ordering::Release);
-                let Ok(source) = tap.mach_port().create_runloop_source(0) else {
+                if !active {
+                    log::info!("keyboard tap is listen-only: Escape and the shortcut's key also reach apps");
+                }
+                tap.active.store(active, Ordering::Release);
+                tap.port
+                    .store(cg_tap.mach_port().as_concrete_TypeRef() as usize, Ordering::Release);
+                let Ok(source) = cg_tap.mach_port().create_runloop_source(0) else {
                     let _ = ready_tx.send(Err("could not attach the event tap".into()));
                     return;
                 };
-                CFRunLoop::get_current().add_source(&source, unsafe { kCFRunLoopCommonModes });
-                tap.enable();
+                let run_loop = CFRunLoop::get_current();
+                run_loop.add_source(&source, unsafe { kCFRunLoopCommonModes });
+                SWEPT.with(|t| *t.borrow_mut() = Some(tap.clone()));
+                let every = STALE_KEY_SWEEP.as_secs_f64();
+                let first = unsafe { CFAbsoluteTimeGetCurrent() } + every;
+                let timer = CFRunLoopTimer::new(first, every, 0, 0, on_sweep_timer, std::ptr::null_mut());
+                run_loop.add_timer(&timer, unsafe { kCFRunLoopCommonModes });
+                cg_tap.enable();
                 let _ = ready_tx.send(Ok(()));
                 CFRunLoop::run_current();
             })?;
@@ -167,9 +171,144 @@ impl MacHotkeys {
         self.shared.lock().capturing = on;
     }
 
+    pub fn set_recording(&self, on: bool) {
+        self.shared.lock().recording = on;
+    }
+
+    /// Modifiers held right now, as the keyboard reports them.
     pub fn mods_probe(&self) -> Arc<dyn Fn() -> Mods + Send + Sync> {
-        let shared = self.shared.clone();
-        Arc::new(move || shared.lock().held_mods)
+        Arc::new(|| {
+            let flags = CGEventFlags::from_bits_retain(unsafe { CGEventSourceFlagsState(HID_STATE) });
+            [Mods::CTRL, Mods::ALT, Mods::SHIFT, Mods::SUPER]
+                .into_iter()
+                .filter(|m| flags.contains(flag_for(*m)))
+                .fold(Mods::empty(), |a, m| a | m)
+        })
+    }
+}
+
+impl Tap {
+    fn on_event(&self, etype: CGEventType, event: &CGEvent) -> CallbackResult {
+        // macOS switches taps off when a callback is slow, and while a
+        // password field has secure input (System Settings asks for one
+        // when toggling permissions). Without this the shortcut stays dead
+        // until restart.
+        if matches!(etype, CGEventType::TapDisabledByTimeout | CGEventType::TapDisabledByUserInput) {
+            log::info!("keyboard event tap was disabled by macOS ({etype:?}); re-enabling");
+            let mut st = self.state.lock();
+            // Keys may have changed while we weren't listening.
+            st.held.clear();
+            st.tracker = ChordTracker::default();
+            st.filter.reset();
+            let p = self.port.load(Ordering::Acquire);
+            if p != 0 {
+                unsafe { CGEventTapEnable(p as CFMachPortRef, true) };
+            }
+            return CallbackResult::Keep;
+        }
+        // Our own typing and pasting.
+        if event.get_integer_value_field(EventField::EVENT_SOURCE_USER_DATA) == SYNTHETIC_MARKER {
+            return CallbackResult::Keep;
+        }
+        let code = event.get_integer_value_field(EventField::KEYBOARD_EVENT_KEYCODE) as u32;
+        let (chord, capturing, recording) = {
+            let sh = self.shared.lock();
+            (sh.chord.clone(), sh.capturing, sh.recording)
+        };
+        let active = self.active.load(Ordering::Acquire);
+        // Newer keyboards send the Globe key as a key of its own, next to
+        // Fn's flag change.
+        if code == KVK_GLOBE {
+            let drop = active && chord.as_ref().is_some_and(Chord::is_fn_only);
+            return if drop { CallbackResult::Drop } else { CallbackResult::Keep };
+        }
+        let flags = event.get_flags();
+        let mut st = self.state.lock();
+        let (change, newly) = match etype {
+            CGEventType::KeyDown if event.get_integer_value_field(EventField::KEYBOARD_EVENT_AUTOREPEAT) != 0 => {
+                (KeyChange::Repeat, None)
+            }
+            CGEventType::KeyDown => (KeyChange::Press, st.held.press(code).then_some(code)),
+            CGEventType::KeyUp => {
+                st.held.release(code);
+                (KeyChange::Release, None)
+            }
+            // Caps Lock also reports through here, but only when it
+            // toggles: tracked as a key it would look held while it's on,
+            // blocking the shortcut and shortcut recording.
+            CGEventType::FlagsChanged if MacKeys.modifier_of(code).is_none() => return CallbackResult::Keep,
+            CGEventType::FlagsChanged => {
+                // A modifier changed; which way is told by the flags.
+                let was_down = st.held.contains(code);
+                let down = modifier_down(code, flags, was_down);
+                if down {
+                    st.held.press(code);
+                } else {
+                    st.held.release(code);
+                }
+                sync_modifiers(&mut st.held, flags);
+                let change = if down { KeyChange::Press } else { KeyChange::Release };
+                (change, (down && !was_down).then_some(code))
+            }
+            _ => return CallbackResult::Keep,
+        };
+        if newly.is_some() {
+            // Before the shortcut can fire: a key that has looked held a
+            // while may have been let go unseen.
+            let TapState { held, filter, .. } = &mut *st;
+            held.drop_stale(STALE_KEY_AGE, |k| filter.is_dropped(k) || key_is_down(k));
+        }
+        let completed = change != KeyChange::Repeat && self.track(&mut st, newly, chord.as_ref(), capturing);
+        let input = FilterInput {
+            chord: chord.as_ref(),
+            completed_chord: completed,
+            recording,
+            capturing,
+        };
+        if active && st.filter.should_drop(&MacKeys, code, change, &input) {
+            CallbackResult::Drop
+        } else {
+            CallbackResult::Keep
+        }
+    }
+
+    /// Runs the tracker; returns whether this press completed the shortcut.
+    fn track(&self, st: &mut TapState, newly: Option<u32>, chord: Option<&Chord>, capturing: bool) -> bool {
+        let TapState { held, tracker, .. } = st;
+        let (events, _mods) = tracker.update(&MacKeys, &held.keys, newly, chord, capturing);
+        if events.iter().any(|e| matches!(e, HotkeyEvent::Captured(_))) {
+            self.shared.lock().capturing = false;
+        }
+        let completed = events.contains(&HotkeyEvent::Down);
+        for ev in events {
+            let _ = self.events.send(ev);
+        }
+        completed
+    }
+
+    /// Every few seconds: forget keys the keyboard says are up, so a
+    /// shortcut whose release was missed still ends.
+    fn sweep(&self) {
+        let mut st = self.state.lock();
+        let TapState { held, filter, .. } = &mut *st;
+        if held.drop_stale(STALE_KEY_AGE, |k| filter.is_dropped(k) || key_is_down(k)).is_empty() {
+            return;
+        }
+        log::debug!("hotkeys: dropped keys macOS reports as released");
+        let (chord, capturing) = {
+            let sh = self.shared.lock();
+            (sh.chord.clone(), sh.capturing)
+        };
+        self.track(&mut st, None, chord.as_ref(), capturing);
+    }
+}
+
+/// Whether the keyboard reports `code` as held. Modifiers by their flag:
+/// Fn's has no reliable per-key state.
+fn key_is_down(code: u32) -> bool {
+    match MacKeys.modifier_of(code) {
+        Some(m) => CGEventFlags::from_bits_retain(unsafe { CGEventSourceFlagsState(HID_STATE) }).contains(flag_for(m)),
+        None => unsafe { CGEventSourceKeyState(HID_STATE, code as u16) },
     }
 }
 
@@ -219,10 +358,10 @@ fn modifier_down(code: u32, flags: CGEventFlags, was_down: bool) -> bool {
 
 /// Drop modifier keys the flags say are no longer held (e.g. a release that
 /// happened while the tap wasn't listening).
-fn sync_modifiers(pressed: &mut HashSet<u32>, flags: CGEventFlags) {
+fn sync_modifiers(held: &mut HeldKeys, flags: CGEventFlags) {
     for (code, m) in MODIFIERS {
         if !flags.contains(flag_for(*m)) {
-            pressed.remove(code);
+            held.release(*code);
         }
     }
 }
