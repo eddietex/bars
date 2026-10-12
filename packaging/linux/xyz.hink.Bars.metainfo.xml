@@ -36,6 +36,15 @@
     <internet>first-run</internet>
   </requires>
   <releases>
+    <release version="0.2.1" date="2026-10-12">
+      <description>
+        <ul>
+          <li>macOS: no longer crashes when inserting text after dictation.</li>
+          <li>macOS: setup asks only for Accessibility, and Allow access opens its settings.</li>
+          <li>macOS: the disk image shows its background and layout again.</li>
+        </ul>
+      </description>
+    </release>
     <release version="0.2.0" date="2026-10-12">
       <description>
         <p>Windows and macOS: global shortcut, typing and pasting, tray, setup assistant, launch at login, and the dictation pill.</p>

@@ -13,6 +13,11 @@ on:
         description: "Release tag, e.g. v0.2.0 (empty = build only)"
         required: false
         default: ""
+      only:
+        description: "Build just one platform (no release is drafted)"
+        type: choice
+        options: [all, Linux, Windows, macOS]
+        default: all
 
 permissions:
   contents: write
@@ -28,6 +33,7 @@ jobs:
         include:
           - { arch: x86_64, runner: ubuntu-24.04 }
           - { arch: aarch64, runner: ubuntu-24.04-arm }
+    if: inputs.only == '' || inputs.only == 'all' || inputs.only == 'Linux'
     runs-on: ${{ matrix.runner }}
     container:
       image: ghcr.io/flathub-infra/flatpak-github-actions:freedesktop-26.08
@@ -55,6 +61,7 @@ jobs:
         include:
           - { arch: x86_64, runner: ubuntu-24.04 }
           - { arch: aarch64, runner: ubuntu-24.04-arm }
+    if: inputs.only == '' || inputs.only == 'all' || inputs.only == 'Linux'
     runs-on: ${{ matrix.runner }}
     steps:
       - uses: actions/checkout@v4
@@ -91,6 +98,7 @@ jobs:
         include:
           - { arch: x64, runner: windows-latest }
           - { arch: arm64, runner: windows-11-arm }
+    if: inputs.only == '' || inputs.only == 'all' || inputs.only == 'Windows'
     runs-on: ${{ matrix.runner }}
     steps:
       - uses: actions/checkout@v4
@@ -116,6 +124,7 @@ jobs:
   # Apple Silicon only: ONNX Runtime no longer ships Intel Mac builds.
   macos:
     name: macOS (Apple Silicon)
+    if: inputs.only == '' || inputs.only == 'all' || inputs.only == 'macOS'
     runs-on: macos-14
     steps:
       - uses: actions/checkout@v4
@@ -135,7 +144,7 @@ jobs:
   release:
     name: Draft release
     needs: [flatpak, linux-tarball, windows, macos]
-    if: startsWith(github.ref, 'refs/tags/v') || inputs.version != ''
+    if: startsWith(github.ref, 'refs/tags/v') || (inputs.version != '' && (inputs.only == '' || inputs.only == 'all'))
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/download-artifact@v4
