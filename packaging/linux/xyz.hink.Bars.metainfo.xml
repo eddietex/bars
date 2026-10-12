@@ -36,6 +36,15 @@
     <internet>first-run</internet>
   </requires>
   <releases>
+    <release version="0.2.2" date="2026-10-12">
+      <description>
+        <ul>
+          <li>Model downloads trust the system's certificates, so they work behind company proxies and antivirus that inspect HTTPS.</li>
+          <li>macOS: changing the shortcut works again; the shortcut keeps working after macOS asks for a password, and with Caps Lock on.</li>
+          <li>The version is shown in the settings sidebar and by bars --version.</li>
+        </ul>
+      </description>
+    </release>
     <release version="0.2.1" date="2026-10-12">
       <description>
         <ul>
