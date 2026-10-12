@@ -13,7 +13,7 @@ const MODIFIER_ONLY_HINT: &str = "Works in every app. Modifier-only shortcuts li
 const MODIFIER_ONLY_HINT: &str = "Works in every app. Modifier-only shortcuts like Ctrl + Win never type anything.";
 #[cfg(not(any(target_os = "macos", target_os = "windows")))]
 const MODIFIER_ONLY_HINT: &str = "Works in every app. Modifier-only shortcuts like Ctrl + Super never type anything.";
-use crate::theme::{Palette, PaletteExt};
+use crate::theme::PaletteExt;
 use crate::widgets::*;
 
 impl SettingsView {
@@ -39,7 +39,6 @@ impl SettingsView {
         let hotkeys_ok = st.hotkeys_active;
         let desktop_shortcut = st.desktop_shortcut;
         let shortcut_parts = st.shortcut_parts();
-        let devices = st.devices.clone();
         let state = self.state.clone();
 
         let set = {
@@ -118,10 +117,8 @@ impl SettingsView {
         );
 
         // --- Microphone -------------------------------------------------
-        let mic_options: Vec<(Option<String>, String)> = std::iter::once((None, "System default".to_string()))
-            .chain(devices.iter().map(|d| (Some(d.id.clone()), d.name.clone())))
-            .collect();
-        let mic_picker = self.picker(
+        let mic_options = st.mic_options();
+        let mic_picker = picker(
             "mic",
             mic_options,
             cfg.audio.device.clone(),
@@ -130,7 +127,6 @@ impl SettingsView {
                 let set = set.clone();
                 move |v: Option<String>, cx: &mut App| set(cx, Box::new(move |c| c.audio.device = v))
             },
-            cx,
         );
 
         let paste_keys = segmented(
@@ -359,95 +355,5 @@ impl SettingsView {
                     ],
                 )),
             )
-    }
-
-    /// A compact dropdown built from a popover menu of options.
-    pub fn picker<T: Clone + PartialEq + 'static>(
-        &self,
-        id: &'static str,
-        options: Vec<(T, String)>,
-        selected: T,
-        p: Palette,
-        on_pick: impl Fn(T, &mut App) + 'static,
-        _cx: &mut Context<Self>,
-    ) -> impl IntoElement {
-        use gpui_kit::component::popover::Popover;
-        let label = options
-            .iter()
-            .find(|(v, _)| *v == selected)
-            .map(|(_, l)| l.clone())
-            .unwrap_or_else(|| "Unavailable".into());
-        let on_pick = std::rc::Rc::new(on_pick);
-        Popover::new(id)
-            .trigger(PickerTrigger { id, label: label.into(), open: false, p })
-            .content(move |_, _window, cx| {
-                let p = cx.palette();
-                let popover = cx.entity();
-                let on_pick = on_pick.clone();
-                let selected = selected.clone();
-                v_col()
-                    .w(px(300.))
-                    .p(px(4.))
-                    .children(options.iter().cloned().enumerate().map(move |(i, (value, label))| {
-                        let active = value == selected;
-                        let on_pick = on_pick.clone();
-                        let popover = popover.clone();
-                        h_row()
-                            .id(ElementId::NamedInteger(id.into(), i as u64))
-                            .h(px(30.))
-                            .px(px(10.))
-                            .gap(px(8.))
-                            .rounded(px(6.))
-                            .cursor_pointer()
-                            .text_size(px(13.))
-                            .hover(move |s| s.bg(p.hover))
-                            .on_click(move |_, window, cx| {
-                                on_pick(value.clone(), cx);
-                                popover.update(cx, |s, cx| s.dismiss(window, cx));
-                            })
-                            .child(div().flex_1().min_w_0().truncate().child(label))
-                            .when(active, |el| el.child(icon(I::Check, p.accent_text, 14.)))
-                    }))
-            })
-    }
-}
-
-#[derive(IntoElement)]
-struct PickerTrigger {
-    id: &'static str,
-    label: SharedString,
-    open: bool,
-    p: Palette,
-}
-
-impl gpui_kit::base::Selectable for PickerTrigger {
-    fn selected(mut self, selected: bool) -> Self {
-        self.open = selected;
-        self
-    }
-
-    fn is_selected(&self) -> bool {
-        self.open
-    }
-}
-
-impl RenderOnce for PickerTrigger {
-    fn render(self, _: &mut Window, _: &mut App) -> impl IntoElement {
-        let p = self.p;
-        h_row()
-            .id(SharedString::from(format!("{}-trigger", self.id)))
-            .h(px(32.))
-            .w(px(260.))
-            .px(px(12.))
-            .gap(px(8.))
-            .justify_between()
-            .rounded(px(8.))
-            .bg(p.surface_2)
-            .border_1()
-            .border_color(if self.open { p.accent } else { p.border })
-            .cursor_pointer()
-            .hover(move |s| s.border_color(p.border_strong))
-            .child(div().flex_1().min_w_0().truncate().text_size(px(13.)).child(self.label))
-            .child(icon(I::ChevronsUpDown, p.text_faint, 14.))
     }
 }

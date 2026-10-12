@@ -44,13 +44,12 @@ impl SettingsView {
             .chain(LANGUAGES.iter().map(|(c, n)| (Some(c.to_string()), n.to_string())))
             .collect();
         let state = self.state.clone();
-        let lang_picker = self.picker(
+        let lang_picker = picker(
             "language",
             lang_options,
             language,
             p,
             move |v, cx| state.update(cx, |s, cx| s.edit_config(cx, |c| c.model.language = v)),
-            cx,
         );
 
         v_col()

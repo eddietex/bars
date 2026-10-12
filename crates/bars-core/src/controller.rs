@@ -650,7 +650,12 @@ impl Controller {
         if cfg.model != old.model {
             self.engine.select(&cfg.model.id, cfg.model.threads, cfg.model.unload_after_mins);
         }
-        if cfg.audio.keep_warm != old.audio.keep_warm || cfg.audio.device != old.audio.device {
+        if cfg.audio.device != old.audio.device && self.mic_testing && self.phase == Phase::Idle {
+            // The microphone test (setup assistant) is listening: move it to
+            // the newly picked device right away.
+            self.audio.cancel();
+            self.audio.start(cfg.audio.device.clone(), cfg.audio.keep_warm);
+        } else if cfg.audio.keep_warm != old.audio.keep_warm || cfg.audio.device != old.audio.device {
             self.audio.set_warm(cfg.audio.device.clone(), cfg.audio.keep_warm);
         }
         if cfg.text != old.text {

@@ -150,6 +150,7 @@ impl Onboarding {
         match step {
             Step::Microphone => {
                 self.heard_voice = false;
+                self.state.update(cx, |s, cx| s.refresh_devices(cx));
                 self.state.read(cx).send(Command::MicTest(true));
             }
             Step::Access => self.state.read(cx).send(Command::RefreshPermissions),
@@ -232,7 +233,25 @@ impl Onboarding {
         let missing = mic.as_ref().is_some_and(|m| m.status == ReqStatus::Missing);
         // A microphone is there, but the OS isn't letting Bars use it.
         let blocked = missing && mic.as_ref().is_some_and(|m| m.granted_note.is_some());
-        let device = mic.as_ref().and_then(|m| m.granted_note.clone()).unwrap_or_else(|| "Microphone".into());
+        // Pick another microphone right here; the test switches to it at once.
+        let device: AnyElement = if st.devices.is_empty() {
+            div()
+                .text_size(px(14.))
+                .font_weight(FontWeight::MEDIUM)
+                .child("Microphone")
+                .into_any_element()
+        } else {
+            let state = self.state.clone();
+            let this = cx.entity().downgrade();
+            picker("ob-mic", st.mic_options(), st.config.audio.device.clone(), p, move |v, cx| {
+                state.update(cx, |s, cx| s.edit_config(cx, |c| c.audio.device = v));
+                let _ = this.update(cx, |o, cx| {
+                    o.heard_voice = false;
+                    cx.notify();
+                });
+            })
+            .into_any_element()
+        };
         v_col()
             .gap(px(14.))
             .child(step_icon(I::Mic, p))
@@ -254,7 +273,7 @@ impl Onboarding {
                                 h_row()
                                     .gap(px(10.))
                                     .child(icon(I::Mic, p.text_muted, 16.))
-                                    .child(div().text_size(px(14.)).font_weight(FontWeight::MEDIUM).child(device)),
+                                    .child(device),
                             )
                             .child(if blocked {
                                 badge("Needs permission", p.warning).into_any_element()

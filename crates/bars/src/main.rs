@@ -89,9 +89,10 @@ fn main() {
         use windows::Win32::System::Console::{ATTACH_PARENT_PROCESS, AttachConsole};
         let _ = AttachConsole(ATTACH_PARENT_PROCESS);
     }
-    bars_core::audio::prepare_environment();
     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info,ort=warn,naga=warn,wgpu=warn,blade_graphics=warn,transcribe_rs=warn,zbus=error,tracing::span=off,pulseaudio::client::reactor=off"))
         .init();
+    // Still before any other thread exists (the logger starts none).
+    bars_core::audio::prepare_environment();
 
     let arg = std::env::args().nth(1);
     let remote = match arg.as_deref() {
@@ -183,6 +184,7 @@ fn main() {
             autostart::sync(config.ui.launch_at_login);
 
             let state = cx.new(|cx| AppState::new(handle, config.clone(), cx));
+            state.update(cx, |s, cx| s.refresh_devices(cx));
             state::pump(state.clone(), ui_rx, cx);
 
             // Keep autostart in sync with the setting.

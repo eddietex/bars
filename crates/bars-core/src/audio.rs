@@ -21,12 +21,18 @@ const PREROLL: Duration = Duration::from_millis(350);
 
 /// Must run at startup, before any other thread exists.
 ///
-/// Sandboxed (Flatpak) apps can't see `~/.config/pulse/cookie`, so the
+/// Linux: sandboxed (Flatpak) apps can't see `~/.config/pulse/cookie`, so the
 /// native PulseAudio client would send an empty cookie, which pipewire-pulse
 /// rejects. Like libpulse, fall back to a zeroed 256-byte cookie: PipeWire
 /// ignores its contents and PulseAudio authenticates same-user clients by
 /// socket credentials.
+///
+/// macOS: CoreAudio delivers device notifications on its own thread instead
+/// of the main run loop (as PortAudio and JUCE configure it), so a device
+/// being reconfigured can never wait on the UI thread.
 pub fn prepare_environment() {
+    #[cfg(target_os = "macos")]
+    mac_hal::use_own_notification_thread();
     #[cfg(target_os = "linux")]
     {
         if std::env::var_os("PULSE_COOKIE").is_some() {
@@ -48,6 +54,54 @@ pub fn prepare_environment() {
         }
         // SAFETY: documented to be called at startup, before threads exist.
         unsafe { std::env::set_var("PULSE_COOKIE", &path) };
+    }
+}
+
+#[cfg(target_os = "macos")]
+mod mac_hal {
+    use std::ffi::c_void;
+
+    #[repr(C)]
+    struct AudioObjectPropertyAddress {
+        selector: u32,
+        scope: u32,
+        element: u32,
+    }
+
+    #[link(name = "CoreAudio", kind = "framework")]
+    unsafe extern "C" {
+        fn AudioObjectSetPropertyData(
+            object: u32,
+            address: *const AudioObjectPropertyAddress,
+            qualifier_size: u32,
+            qualifier: *const c_void,
+            data_size: u32,
+            data: *const c_void,
+        ) -> i32;
+    }
+
+    const SYSTEM_OBJECT: u32 = 1; // kAudioObjectSystemObject
+    const RUN_LOOP: u32 = u32::from_be_bytes(*b"rnlp"); // kAudioHardwarePropertyRunLoop
+    const SCOPE_GLOBAL: u32 = u32::from_be_bytes(*b"glob");
+
+    /// Sets kAudioHardwarePropertyRunLoop to NULL: the HAL then runs its
+    /// own thread for notifications.
+    pub fn use_own_notification_thread() {
+        let address = AudioObjectPropertyAddress { selector: RUN_LOOP, scope: SCOPE_GLOBAL, element: 0 };
+        let run_loop: *const c_void = std::ptr::null();
+        let status = unsafe {
+            AudioObjectSetPropertyData(
+                SYSTEM_OBJECT,
+                &address,
+                0,
+                std::ptr::null(),
+                std::mem::size_of::<*const c_void>() as u32,
+                &run_loop as *const *const c_void as *const c_void,
+            )
+        };
+        if status != 0 {
+            log::warn!("could not move CoreAudio notifications off the main thread (OSStatus {status})");
+        }
     }
 }
 
@@ -426,7 +480,11 @@ fn small_buffer(range: &cpal::SupportedBufferSize, rate: u32, ms: u32) -> cpal::
 }
 
 fn pick_config(dev: &cpal::Device) -> anyhow::Result<(StreamConfig, SampleFormat)> {
-    // Prefer the server doing the conversion to 16 kHz mono for us.
+    // Linux: prefer the sound server doing the conversion to 16 kHz mono for
+    // us. Elsewhere a non-native config reconfigures the device itself, for
+    // every app (and switches Bluetooth headsets into their low-quality call
+    // mode), so record in the device's own format and resample here.
+    #[cfg(target_os = "linux")]
     if let Ok(ranges) = dev.supported_input_configs() {
         let mut best: Option<(StreamConfig, SampleFormat, u8)> = None;
         for r in ranges {

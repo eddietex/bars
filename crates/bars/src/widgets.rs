@@ -4,7 +4,7 @@ use gpui_kit::component::{Icon, IconNamed, Sizable};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 
-use crate::theme::Palette;
+use crate::theme::{Palette, PaletteExt};
 
 pub type ClickHandler = Box<dyn Fn(&ClickEvent, &mut Window, &mut App) + 'static>;
 
@@ -361,4 +361,92 @@ pub fn small_switch(
 #[allow(unused)]
 pub fn handler(f: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static) -> ClickHandler {
     Box::new(f)
+}
+
+/// A compact dropdown built from a popover menu of options.
+pub fn picker<T: Clone + PartialEq + 'static>(
+    id: &'static str,
+    options: Vec<(T, String)>,
+    selected: T,
+    p: Palette,
+    on_pick: impl Fn(T, &mut App) + 'static,
+) -> impl IntoElement {
+    use gpui_kit::component::popover::Popover;
+    let label = options
+        .iter()
+        .find(|(v, _)| *v == selected)
+        .map(|(_, l)| l.clone())
+        .unwrap_or_else(|| "Unavailable".into());
+    let on_pick = std::rc::Rc::new(on_pick);
+    Popover::new(id)
+        .trigger(PickerTrigger { id, label: label.into(), open: false, p })
+        .content(move |_, _window, cx| {
+            let p = cx.palette();
+            let popover = cx.entity();
+            let on_pick = on_pick.clone();
+            let selected = selected.clone();
+            v_col()
+                .w(px(300.))
+                .p(px(4.))
+                .children(options.iter().cloned().enumerate().map(move |(i, (value, label))| {
+                    let active = value == selected;
+                    let on_pick = on_pick.clone();
+                    let popover = popover.clone();
+                    h_row()
+                        .id(ElementId::NamedInteger(id.into(), i as u64))
+                        .h(px(30.))
+                        .px(px(10.))
+                        .gap(px(8.))
+                        .rounded(px(6.))
+                        .cursor_pointer()
+                        .text_size(px(13.))
+                        .hover(move |s| s.bg(p.hover))
+                        .on_click(move |_, window, cx| {
+                            on_pick(value.clone(), cx);
+                            popover.update(cx, |s, cx| s.dismiss(window, cx));
+                        })
+                        .child(div().flex_1().min_w_0().truncate().child(label))
+                        .when(active, |el| el.child(icon(gpui_kit::assets::IconName::Check, p.accent_text, 14.)))
+                }))
+        })
+}
+
+#[derive(IntoElement)]
+struct PickerTrigger {
+    id: &'static str,
+    label: SharedString,
+    open: bool,
+    p: Palette,
+}
+
+impl gpui_kit::base::Selectable for PickerTrigger {
+    fn selected(mut self, selected: bool) -> Self {
+        self.open = selected;
+        self
+    }
+
+    fn is_selected(&self) -> bool {
+        self.open
+    }
+}
+
+impl RenderOnce for PickerTrigger {
+    fn render(self, _: &mut Window, _: &mut App) -> impl IntoElement {
+        let p = self.p;
+        h_row()
+            .id(SharedString::from(format!("{}-trigger", self.id)))
+            .h(px(32.))
+            .w(px(260.))
+            .px(px(12.))
+            .gap(px(8.))
+            .justify_between()
+            .rounded(px(8.))
+            .bg(p.surface_2)
+            .border_1()
+            .border_color(if self.open { p.accent } else { p.border })
+            .cursor_pointer()
+            .hover(move |s| s.border_color(p.border_strong))
+            .child(div().flex_1().min_w_0().truncate().text_size(px(13.)).child(self.label))
+            .child(icon(gpui_kit::assets::IconName::ChevronsUpDown, p.text_faint, 14.))
+    }
 }

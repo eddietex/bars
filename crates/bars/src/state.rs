@@ -81,7 +81,8 @@ impl AppState {
             capturing: false,
             capture_error: None,
             notice: None,
-            devices: audio::list_input_devices(),
+            // Filled in off the UI thread (see refresh_devices).
+            devices: Vec::new(),
             level: cx.new(|_| LevelMeter {
                 level: 0.0,
                 updated: Instant::now(),
@@ -104,9 +105,32 @@ impl AppState {
         cx.notify();
     }
 
+    /// Microphone choices for a picker: the system default (naming the
+    /// device it currently is), then every input device.
+    pub fn mic_options(&self) -> Vec<(Option<String>, String)> {
+        let default = match self.devices.iter().find(|d| d.is_default) {
+            Some(d) => format!("System default ({})", d.name),
+            None => "System default".to_string(),
+        };
+        std::iter::once((None, default))
+            .chain(self.devices.iter().map(|d| (Some(d.id.clone()), d.name.clone())))
+            .collect()
+    }
+
+    /// Re-reads the microphones in the background: on macOS, device queries
+    /// can block for seconds while a device reconfigures (e.g. a Bluetooth
+    /// headset switching modes), which must never stall the UI thread.
     pub fn refresh_devices(&mut self, cx: &mut Context<Self>) {
-        self.devices = audio::list_input_devices();
-        cx.notify();
+        cx.spawn(async move |this, cx| {
+            let devices = cx.background_executor().spawn(async { audio::list_input_devices() }).await;
+            let _ = this.update(cx, |s, cx| {
+                if s.devices != devices {
+                    s.devices = devices;
+                    cx.notify();
+                }
+            });
+        })
+        .detach();
     }
 
     pub fn start_capture(&mut self, cx: &mut Context<Self>) {
