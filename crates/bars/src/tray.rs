@@ -147,7 +147,7 @@ impl TrayHandle {
         self.0.update(|t| t.state = state);
     }
 
-    pub fn set_needs_setup(&self, needs: bool) {
+    pub fn set_needs_setup(&mut self, needs: bool) {
         self.0.update(|t| {
             if t.needs_setup != needs {
                 t.needs_setup = needs;

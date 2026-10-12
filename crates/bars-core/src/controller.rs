@@ -128,6 +128,8 @@ struct Pending {
 enum InsertJob {
     Text { text: String, cfg: InsertionConfig },
     Copy(String),
+    /// Dictation started: note which app/window should receive the text.
+    RememberTarget,
 }
 
 struct Controller {
@@ -342,6 +344,7 @@ impl Controller {
         }
         self.mic_testing = false;
         self.audio.start(self.cfg.audio.device.clone(), self.cfg.audio.keep_warm);
+        let _ = self.inserter.send(InsertJob::RememberTarget);
         self.recording_since = Some(Instant::now());
         // Delay the start sound slightly: chords that turn out to be part of
         // another shortcut get cancelled within this window silently.
@@ -669,6 +672,7 @@ fn spawn_inserter(ui: EventSender, hotkeys: &Hotkeys) -> Sender<InsertJob> {
                             });
                         }
                     }
+                    InsertJob::RememberTarget => injector.remember_target(),
                     InsertJob::Copy(text) => {
                         if let Err(e) = injector.copy(&text) {
                             let _ = ui.try_send(Event::Notice {

@@ -15,9 +15,16 @@ use crate::widgets::{h_row, icon};
 
 /// Surface size; the pill is drawn centred at its bottom and the input
 /// region is restricted to the pill so the rest is click-through.
+#[cfg(target_os = "linux")]
 const SURFACE: Size<Pixels> = Size {
     width: px(440.),
     height: px(96.),
+};
+/// Windows/macOS windows can't be click-through, so hug the pill.
+#[cfg(not(target_os = "linux"))]
+const SURFACE: Size<Pixels> = Size {
+    width: px(440.),
+    height: px(56.),
 };
 const PILL_H: f32 = 36.;
 const BARS: usize = 13;
@@ -389,12 +396,12 @@ impl MessageExt for Option<(SharedString, NoticeKind)> {
 /// Creates the overlay window. Prefers a layer-shell surface; falls back to
 /// an unfocused popup where layer-shell isn't available (e.g. GNOME).
 pub fn open(state: Entity<AppState>, cx: &mut App) -> Option<WindowHandle<Overlay>> {
-    let bounds = Bounds {
-        origin: point(px(0.), px(0.)),
-        size: SURFACE,
-    };
     #[cfg(target_os = "linux")]
     {
+        let bounds = Bounds {
+            origin: point(px(0.), px(0.)),
+            size: SURFACE,
+        };
         let opts = WindowOptions {
             titlebar: None,
             kind: WindowKind::LayerShell(layer_shell::LayerShellOptions {
@@ -422,10 +429,25 @@ pub fn open(state: Entity<AppState>, cx: &mut App) -> Option<WindowHandle<Overla
             Err(e) => log::info!("layer-shell overlay unavailable ({e}); using a popup"),
         }
     }
+    // Bottom centre of the primary display's work area (above the taskbar
+    // or Dock).
+    let placed = cx
+        .primary_display()
+        .map(|d| {
+            let area = d.visible_bounds();
+            Bounds {
+                origin: point(
+                    area.origin.x + (area.size.width - SURFACE.width) / 2.0,
+                    area.origin.y + area.size.height - SURFACE.height - px(12.),
+                ),
+                size: SURFACE,
+            }
+        })
+        .unwrap_or_else(|| Bounds::centered(None, SURFACE, cx));
     let opts = WindowOptions {
         titlebar: None,
         kind: WindowKind::PopUp,
-        window_bounds: Some(WindowBounds::Windowed(Bounds::centered(None, SURFACE, cx))),
+        window_bounds: Some(WindowBounds::Windowed(placed)),
         window_background: WindowBackgroundAppearance::Transparent,
         focus: false,
         show: true,

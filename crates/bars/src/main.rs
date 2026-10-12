@@ -12,6 +12,9 @@ mod state;
 mod theme;
 #[cfg(target_os = "linux")]
 mod tray;
+#[cfg(any(target_os = "windows", target_os = "macos"))]
+#[path = "tray_native.rs"]
+mod tray;
 mod widgets;
 
 use std::borrow::Cow;
@@ -54,6 +57,19 @@ impl AssetSource for Assets {
 }
 
 const USAGE: &str = "Usage: bars [--background | --toggle | --cancel | --paste-last | --settings | --quit | --doctor]";
+
+#[cfg(target_os = "windows")]
+fn single_instance_windows() -> bool {
+    use windows::Win32::Foundation::{ERROR_ALREADY_EXISTS, GetLastError};
+    use windows::Win32::System::Threading::CreateMutexW;
+    use windows::core::w;
+    // The handle is intentionally leaked: it marks this process as the
+    // running instance until it exits.
+    match unsafe { CreateMutexW(None, true, w!("Local\\xyz.hink.Bars")) } {
+        Ok(_) => (unsafe { GetLastError() }) != ERROR_ALREADY_EXISTS,
+        Err(_) => true,
+    }
+}
 
 fn main() {
     bars_core::audio::prepare_environment();
@@ -102,6 +118,14 @@ fn main() {
             None
         }
     };
+    // Windows: one instance at a time (two keyboard hooks would type twice).
+    #[cfg(target_os = "windows")]
+    if !single_instance_windows() {
+        if remote.is_none() {
+            eprintln!("Bars is already running (see the tray).");
+        }
+        return;
+    }
     if remote.is_some_and(|m| m != "ShowSettings") {
         eprintln!("Bars isn't running.");
         std::process::exit(1);
@@ -111,12 +135,14 @@ fn main() {
     let (ui_tx, ui_rx) = async_channel::bounded(1024);
     let handle = controller::spawn(config.clone(), ui_tx);
 
-    gpui_kit::application()
-        .with_assets(Assets)
-        // Linux has a tray, so closing windows keeps Bars running. Elsewhere
-        // (no tray yet) use the platform default so the app can't linger
-        // invisibly.
-        .with_quit_mode(if cfg!(target_os = "linux") { QuitMode::Explicit } else { QuitMode::Default })
+    let reopen_tx = shell_tx.clone();
+    let app = gpui_kit::application();
+    app.on_reopen(move |_| {
+        let _ = reopen_tx.try_send(ShellCommand::ShowSettings(None));
+    });
+    app.with_assets(Assets)
+        // Bars lives in the tray, so closing windows keeps it running.
+        .with_quit_mode(QuitMode::Explicit)
         .run(move |cx| {
             gpui_kit::init(cx);
             let fonts: Vec<Cow<'static, [u8]>> = vec![

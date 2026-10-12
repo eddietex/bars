@@ -4,7 +4,13 @@
 
 #[cfg(target_os = "linux")]
 pub mod linux;
+#[cfg(target_os = "macos")]
+pub mod mac;
+#[cfg(any(target_os = "windows", target_os = "macos"))]
+pub mod native_inject;
 pub mod requirements;
+#[cfg(target_os = "windows")]
+pub mod win;
 
 use crossbeam_channel::Sender;
 
@@ -35,7 +41,18 @@ pub fn doctor_report() -> String {
     }
     #[cfg(not(target_os = "linux"))]
     {
-        "diagnostics are not implemented on this platform yet".into()
+        let p = check_permissions(&requirements::Context::default());
+        let mut out = format!("Bars {} diagnostics ({})\n", env!("CARGO_PKG_VERSION"), std::env::consts::OS);
+        for r in &p.items {
+            out += &format!("  [{:?}] {}\n", r.status, r.title);
+        }
+        for d in crate::audio::list_input_devices() {
+            out += &format!("  mic: {}{}\n", d.name, if d.is_default { " (default)" } else { "" });
+        }
+        for m in crate::models::CATALOG {
+            out += &format!("  model {}: {}\n", m.id, if m.is_installed() { "installed" } else { "-" });
+        }
+        out
     }
 }
 
@@ -55,7 +72,31 @@ pub fn check_permissions(ctx: &requirements::Context) -> Permissions {
             items,
         }
     }
-    #[cfg(not(target_os = "linux"))]
+    #[cfg(target_os = "macos")]
+    {
+        Permissions {
+            hotkeys: mac::permissions::can_listen(),
+            keyboard: mac::permissions::can_post(),
+            clipboard: true,
+            sandboxed: false,
+            fix_command: None,
+            can_fix_automatically: true,
+            items,
+        }
+    }
+    #[cfg(target_os = "windows")]
+    {
+        Permissions {
+            hotkeys: true,
+            keyboard: true,
+            clipboard: true,
+            sandboxed: false,
+            fix_command: None,
+            can_fix_automatically: false,
+            items,
+        }
+    }
+    #[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "windows")))]
     {
         Permissions {
             items,
@@ -71,7 +112,13 @@ pub fn fix_permissions() -> anyhow::Result<()> {
     {
         linux::permissions::install_with_pkexec()
     }
-    #[cfg(not(target_os = "linux"))]
+    #[cfg(target_os = "macos")]
+    {
+        // Shows the system prompts, which lead to System Settings.
+        mac::permissions::request();
+        Ok(())
+    }
+    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
     {
         Ok(())
     }
@@ -83,6 +130,10 @@ pub enum Hotkeys {
     Evdev(linux::evdev_hotkeys::EvdevHotkeys),
     #[cfg(target_os = "linux")]
     Portal(linux::portal::PortalHotkeys),
+    #[cfg(target_os = "windows")]
+    Windows(win::hotkeys::WinHotkeys),
+    #[cfg(target_os = "macos")]
+    Mac(mac::hotkeys::MacHotkeys),
     /// No backend could be started; dictation can still be triggered from
     /// the tray, the overlay, or `bars --toggle`.
     None(String),
@@ -118,6 +169,22 @@ impl Hotkeys {
             }
             return Hotkeys::None(errors.join("; "));
         }
+        #[cfg(target_os = "windows")]
+        {
+            let _ = kind;
+            return match win::hotkeys::WinHotkeys::spawn(chord, events) {
+                Ok(h) => Hotkeys::Windows(h),
+                Err(e) => Hotkeys::None(format!("{e:#}")),
+            };
+        }
+        #[cfg(target_os = "macos")]
+        {
+            let _ = kind;
+            return match mac::hotkeys::MacHotkeys::spawn(chord, events) {
+                Ok(h) => Hotkeys::Mac(h),
+                Err(e) => Hotkeys::None(format!("{e:#}")),
+            };
+        }
         #[allow(unreachable_code)]
         {
             let _ = (kind, chord, events);
@@ -136,6 +203,10 @@ impl Hotkeys {
             Hotkeys::Evdev(_) => "direct",
             #[cfg(target_os = "linux")]
             Hotkeys::Portal(_) => "desktop",
+            #[cfg(target_os = "windows")]
+            Hotkeys::Windows(_) => "direct",
+            #[cfg(target_os = "macos")]
+            Hotkeys::Mac(_) => "direct",
             Hotkeys::None(_) => "none",
         }
     }
@@ -172,7 +243,13 @@ impl Hotkeys {
         match self {
             #[cfg(target_os = "linux")]
             Hotkeys::Evdev(h) => h.set_chord(chord),
-            _ => {}
+            #[cfg(target_os = "windows")]
+            Hotkeys::Windows(h) => h.set_chord(chord),
+            #[cfg(target_os = "macos")]
+            Hotkeys::Mac(h) => h.set_chord(chord),
+            _ => {
+                let _ = chord;
+            }
         }
     }
 
@@ -180,7 +257,13 @@ impl Hotkeys {
         match self {
             #[cfg(target_os = "linux")]
             Hotkeys::Evdev(h) => h.set_capture(on),
-            _ => {}
+            #[cfg(target_os = "windows")]
+            Hotkeys::Windows(h) => h.set_capture(on),
+            #[cfg(target_os = "macos")]
+            Hotkeys::Mac(h) => h.set_capture(on),
+            _ => {
+                let _ = on;
+            }
         }
     }
 
@@ -189,17 +272,17 @@ impl Hotkeys {
         match self {
             #[cfg(target_os = "linux")]
             Hotkeys::Evdev(h) => Some(h.mods_probe()),
+            #[cfg(target_os = "windows")]
+            Hotkeys::Windows(h) => Some(h.mods_probe()),
+            #[cfg(target_os = "macos")]
+            Hotkeys::Mac(h) => Some(h.mods_probe()),
             _ => None,
         }
     }
 
     /// Modifiers physically held right now, when the backend can tell.
     pub fn held_mods(&self) -> Option<Mods> {
-        match self {
-            #[cfg(target_os = "linux")]
-            Hotkeys::Evdev(h) => Some(h.held_mods()),
-            _ => None,
-        }
+        self.mods_probe().map(|f| f())
     }
 }
 
@@ -207,6 +290,8 @@ impl Hotkeys {
 pub struct Injector {
     #[cfg(target_os = "linux")]
     inner: linux::inject::LinuxInjector,
+    #[cfg(any(target_os = "windows", target_os = "macos"))]
+    inner: native_inject::NativeInjector,
 }
 
 impl Injector {
@@ -214,6 +299,8 @@ impl Injector {
         Injector {
             #[cfg(target_os = "linux")]
             inner: linux::inject::LinuxInjector::new(),
+            #[cfg(any(target_os = "windows", target_os = "macos"))]
+            inner: native_inject::NativeInjector::new(),
         }
     }
 
@@ -223,22 +310,28 @@ impl Injector {
     }
 
     pub fn can_insert(&self) -> bool {
-        #[cfg(target_os = "linux")]
+        #[cfg(any(target_os = "linux", target_os = "windows", target_os = "macos"))]
         {
             self.inner.has_keyboard()
         }
-        #[cfg(not(target_os = "linux"))]
+        #[cfg(not(any(target_os = "linux", target_os = "windows", target_os = "macos")))]
         {
             false
         }
     }
 
+    /// Called when dictation starts, so insertion goes back to that app.
+    pub fn remember_target(&mut self) {
+        #[cfg(any(target_os = "windows", target_os = "macos"))]
+        self.inner.remember_target();
+    }
+
     pub fn insert(&mut self, text: &str, cfg: &InsertionConfig) -> anyhow::Result<()> {
-        #[cfg(target_os = "linux")]
+        #[cfg(any(target_os = "linux", target_os = "windows", target_os = "macos"))]
         {
             self.inner.insert(text, cfg)
         }
-        #[cfg(not(target_os = "linux"))]
+        #[cfg(not(any(target_os = "linux", target_os = "windows", target_os = "macos")))]
         {
             let _ = (text, cfg);
             anyhow::bail!("text insertion is not implemented on this platform yet")
@@ -246,11 +339,11 @@ impl Injector {
     }
 
     pub fn copy(&self, text: &str) -> anyhow::Result<()> {
-        #[cfg(target_os = "linux")]
+        #[cfg(any(target_os = "linux", target_os = "windows", target_os = "macos"))]
         {
             self.inner.copy_only(text)
         }
-        #[cfg(not(target_os = "linux"))]
+        #[cfg(not(any(target_os = "linux", target_os = "windows", target_os = "macos")))]
         {
             let _ = text;
             anyhow::bail!("clipboard is not implemented on this platform yet")

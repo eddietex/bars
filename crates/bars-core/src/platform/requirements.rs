@@ -63,6 +63,7 @@ pub struct Context {
 }
 
 pub fn check(ctx: &Context) -> Vec<Requirement> {
+    #[allow(unused_mut)]
     let mut out = vec![microphone()];
     #[cfg(target_os = "linux")]
     out.push(linux_keyboard(ctx));
@@ -86,12 +87,16 @@ fn microphone() -> Requirement {
     }];
     #[cfg(not(any(target_os = "macos", target_os = "windows")))]
     let actions = Vec::new();
+    #[cfg(target_os = "windows")]
+    let blocked = super::win::permissions::microphone_blocked();
+    #[cfg(not(target_os = "windows"))]
+    let blocked = false;
     Requirement {
         id: ReqId::Microphone,
         title: "Microphone".into(),
         why: "Bars listens only while you hold the shortcut. Audio is transcribed on this computer and never saved."
             .into(),
-        status: if devices.is_empty() {
+        status: if devices.is_empty() || blocked {
             ReqStatus::Missing
         } else {
             ReqStatus::Granted
@@ -144,30 +149,36 @@ fn linux_keyboard(ctx: &Context) -> Requirement {
 
 #[cfg(target_os = "macos")]
 fn macos() -> Vec<Requirement> {
-    // Checks land with the macOS backend (AXIsProcessTrusted,
-    // IOHIDCheckAccess); until then the UI shows these as "check settings".
+    use super::mac::permissions;
+    let status = |ok: bool| if ok { ReqStatus::Granted } else { ReqStatus::Missing };
     vec![
-        Requirement {
-            id: ReqId::Accessibility,
-            title: "Accessibility".into(),
-            why: "Needed to paste or type your words into the app you're using.".into(),
-            status: ReqStatus::Unknown,
-            granted_note: None,
-            actions: vec![FixAction::OpenSettings {
-                label: "Open Accessibility settings".into(),
-                url: "x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility".into(),
-            }],
-        },
         Requirement {
             id: ReqId::InputMonitoring,
             title: "Input Monitoring".into(),
-            why: "Needed to notice your dictation shortcut while other apps are focused.".into(),
-            status: ReqStatus::Unknown,
-            granted_note: None,
-            actions: vec![FixAction::OpenSettings {
-                label: "Open Input Monitoring settings".into(),
-                url: "x-apple.systempreferences:com.apple.preference.security?Privacy_ListenEvent".into(),
-            }],
+            why: "Lets Bars notice your dictation shortcut while other apps are focused. Bars watches only for the shortcut.".into(),
+            status: status(permissions::can_listen()),
+            granted_note: Some("Bars can see your shortcut in every app".into()),
+            actions: vec![
+                FixAction::Elevate,
+                FixAction::OpenSettings {
+                    label: "Open Input Monitoring settings".into(),
+                    url: "x-apple.systempreferences:com.apple.preference.security?Privacy_ListenEvent".into(),
+                },
+            ],
+        },
+        Requirement {
+            id: ReqId::Accessibility,
+            title: "Accessibility".into(),
+            why: "Lets Bars paste or type your words into the app you're using.".into(),
+            status: status(permissions::can_post()),
+            granted_note: Some("Bars can type into other apps".into()),
+            actions: vec![
+                FixAction::Elevate,
+                FixAction::OpenSettings {
+                    label: "Open Accessibility settings".into(),
+                    url: "x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility".into(),
+                },
+            ],
         },
     ]
 }

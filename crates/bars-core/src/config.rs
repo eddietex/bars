@@ -124,15 +124,25 @@ pub enum InsertMethod {
     Type,
 }
 
-#[derive(Copy, Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Copy, Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum PasteKeys {
     /// Shift+Insert, with the text placed on both the clipboard and the
-    /// primary selection. Works in GUI apps *and* terminals.
-    #[default]
+    /// primary selection. Works in GUI apps *and* terminals (Linux).
     ShiftInsert,
+    /// Ctrl+V (Cmd+V on macOS).
     CtrlV,
     CtrlShiftV,
+}
+
+impl Default for PasteKeys {
+    fn default() -> Self {
+        if cfg!(target_os = "linux") {
+            PasteKeys::ShiftInsert
+        } else {
+            PasteKeys::CtrlV
+        }
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -150,7 +160,7 @@ impl Default for InsertionConfig {
     fn default() -> Self {
         InsertionConfig {
             method: InsertMethod::Auto,
-            paste_keys: PasteKeys::ShiftInsert,
+            paste_keys: PasteKeys::default(),
             restore_clipboard: true,
             trailing_space: true,
         }

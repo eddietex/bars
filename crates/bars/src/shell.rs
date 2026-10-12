@@ -17,6 +17,8 @@ use crate::theme;
 #[derive(Clone, Debug)]
 pub enum ShellCommand {
     Toggle,
+    /// Sent by `bars --cancel` (D-Bus, Linux).
+    #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
     Cancel,
     PasteLast,
     ShowSettings(Option<Page>),
@@ -54,7 +56,6 @@ pub struct Shell {
     overlay: Option<WindowHandle<Overlay>>,
     overlay_close: Option<Task<()>>,
     overlay_open: Option<Task<()>>,
-    #[cfg(target_os = "linux")]
     tray: Option<crate::tray::TrayHandle>,
     _subs: Vec<Subscription>,
 }
@@ -73,10 +74,7 @@ impl Shell {
         })
         .detach();
 
-        #[cfg(target_os = "linux")]
         let tray = crate::tray::TrayHandle::spawn(tray_tx);
-        #[cfg(not(target_os = "linux"))]
-        let _ = tray_tx;
 
         // Notification buttons ("Finish setup") come back here.
         let weak = cx.weak_entity();
@@ -93,7 +91,6 @@ impl Shell {
             overlay: None,
             overlay_close: None,
             overlay_open: None,
-            #[cfg(target_os = "linux")]
             tray,
             _subs: subs,
         }
@@ -103,7 +100,6 @@ impl Shell {
         let overlay_enabled = self.state.read(cx).config.ui.overlay != OverlayMode::Never;
         match ev {
             StateEvent::PhaseChanged(phase) => {
-                #[cfg(target_os = "linux")]
                 if let Some(t) = &self.tray {
                     t.set_state(match phase {
                         Phase::Idle => TrayState::Idle,
@@ -120,7 +116,10 @@ impl Shell {
                     // next dictation shows instantly.
                     Phase::Idle => {
                         self.overlay_open = None;
-                        self.schedule_overlay_close(Duration::from_secs(20), cx)
+                        // Linux overlays are click-through when hidden; elsewhere
+                        // close soon so the transparent window can't block clicks.
+                        let keep = if cfg!(target_os = "linux") { 20_000 } else { 3_200 };
+                        self.schedule_overlay_close(Duration::from_millis(keep), cx)
                     }
                     _ => {}
                 }
@@ -136,10 +135,12 @@ impl Shell {
             }
             StateEvent::ThemeChanged => self.apply_theme(cx),
         }
-        #[cfg(target_os = "linux")]
-        if let Some(t) = &self.tray {
+        let needs = {
             let st = self.state.read(cx);
-            t.set_needs_setup(st.permissions_known() && !st.setup_complete());
+            st.permissions_known() && !st.setup_complete()
+        };
+        if let Some(t) = &mut self.tray {
+            t.set_needs_setup(needs);
         }
     }
 

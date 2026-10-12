@@ -5,6 +5,13 @@ use bars_core::config::{InsertMethod, OverlayMode, PasteKeys, ThemeMode};
 use bars_core::hotkey::Activation;
 
 use super::SettingsView;
+
+#[cfg(target_os = "macos")]
+const MODIFIER_ONLY_HINT: &str = "Works in every app. Modifier-only shortcuts like Ctrl + Cmd never type anything.";
+#[cfg(target_os = "windows")]
+const MODIFIER_ONLY_HINT: &str = "Works in every app. Modifier-only shortcuts like Ctrl + Win never type anything.";
+#[cfg(not(any(target_os = "macos", target_os = "windows")))]
+const MODIFIER_ONLY_HINT: &str = "Works in every app. Modifier-only shortcuts like Ctrl + Super never type anything.";
 use crate::theme::{Palette, PaletteExt};
 use crate::widgets::*;
 
@@ -132,7 +139,7 @@ impl SettingsView {
                                 Some(if desktop_shortcut {
                                     "Managed by your desktop's shortcut settings. Allow direct keyboard access in Setup to use modifier-only shortcuts."
                                 } else {
-                                    "Works in every app. Modifier-only shortcuts like Ctrl + Super never type anything."
+                                    MODIFIER_ONLY_HINT
                                 }),
                                 recorder,
                                 p,
@@ -223,13 +230,19 @@ impl SettingsView {
                             p,
                         )
                         .into_any_element(),
+                    ]
+                    .into_iter()
+                    // Paste shortcut choice only matters on Linux (Ctrl+V / Cmd+V elsewhere).
+                    .chain(cfg!(target_os = "linux").then(|| {
                         row(
                             "Paste shortcut",
                             Some("Shift+Insert works in apps and terminals alike."),
                             paste_keys,
                             p,
                         )
-                        .into_any_element(),
+                        .into_any_element()
+                    }))
+                    .chain(vec![
                         row(
                             "Restore clipboard",
                             Some("Put back what you had copied after pasting."),
@@ -256,7 +269,8 @@ impl SettingsView {
                             p,
                         )
                         .into_any_element(),
-                    ],
+                    ])
+                    .collect(),
                 )),
             )
             .child(

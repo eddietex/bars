@@ -168,6 +168,129 @@ pub enum HotkeyEvent {
     Bound(String),
 }
 
+/// How a platform names its key codes. Implemented by each hotkey backend
+/// (evdev codes, Windows virtual keys, macOS key codes).
+pub trait KeyMap {
+    /// The modifier a key code represents, if any.
+    fn modifier_of(&self, code: u32) -> Option<Mods>;
+    /// Canonical name ("Space", "A", "F9") for a non-modifier key.
+    fn name_of(&self, code: u32) -> Option<String>;
+    /// Key code for a canonical name.
+    fn code_of(&self, name: &str) -> Option<u32>;
+    fn is_escape(&self, code: u32) -> bool;
+}
+
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+enum ChordState {
+    Inactive,
+    Active,
+    /// Another key was pressed while the chord was held.
+    Interrupted,
+}
+
+/// Turns the set of currently pressed keys into chord [`HotkeyEvent`]s, and
+/// records new chords for the shortcut picker. Shared by every OS backend.
+#[derive(Debug)]
+pub struct ChordTracker {
+    state: ChordState,
+    capture_keys: Vec<u32>,
+}
+
+impl Default for ChordTracker {
+    fn default() -> Self {
+        ChordTracker {
+            state: ChordState::Inactive,
+            capture_keys: Vec::new(),
+        }
+    }
+}
+
+impl ChordTracker {
+    /// Feed the full pressed set after each key change. `newly_pressed` is
+    /// the key that just went down (None for releases). Returns events and,
+    /// separately, a chord when capture finished.
+    pub fn update(
+        &mut self,
+        map: &dyn KeyMap,
+        pressed: &std::collections::HashSet<u32>,
+        newly_pressed: Option<u32>,
+        chord: Option<&Chord>,
+        capturing: bool,
+    ) -> (Vec<HotkeyEvent>, Mods) {
+        let mods = pressed
+            .iter()
+            .filter_map(|k| map.modifier_of(*k))
+            .fold(Mods::empty(), |a, m| a | m);
+        let mut out = Vec::new();
+
+        if capturing {
+            self.state = ChordState::Inactive;
+            if let Some(k) = newly_pressed {
+                if !self.capture_keys.contains(&k) {
+                    self.capture_keys.push(k);
+                }
+            } else if pressed.is_empty() && !self.capture_keys.is_empty() {
+                let keys = std::mem::take(&mut self.capture_keys);
+                let cmods = keys
+                    .iter()
+                    .filter_map(|k| map.modifier_of(*k))
+                    .fold(Mods::empty(), |a, m| a | m);
+                let key = keys
+                    .iter()
+                    .rev()
+                    .find(|k| map.modifier_of(**k).is_none())
+                    .and_then(|k| map.name_of(*k))
+                    .map(Key);
+                out.push(HotkeyEvent::Captured(Chord { mods: cmods, key }));
+            }
+            return (out, mods);
+        }
+        self.capture_keys.clear();
+
+        if newly_pressed.is_some_and(|k| map.is_escape(k)) {
+            out.push(HotkeyEvent::Escape);
+        }
+        let Some(chord) = chord else { return (out, mods) };
+        let chord_key = match &chord.key {
+            Some(k) => match map.code_of(&k.0) {
+                Some(code) => Some(code),
+                None => return (out, mods), // unmappable key name
+            },
+            None => None,
+        };
+        let others: Vec<u32> = pressed.iter().copied().filter(|k| map.modifier_of(*k).is_none()).collect();
+        let chord_held = mods.contains(chord.mods) && chord_key.is_none_or(|k| pressed.contains(&k));
+        let exact = mods == chord.mods
+            && match chord_key {
+                None => others.is_empty(),
+                Some(k) => others.len() == 1 && others[0] == k,
+            };
+        self.state = match self.state {
+            ChordState::Inactive if exact => {
+                out.push(HotkeyEvent::Down);
+                ChordState::Active
+            }
+            ChordState::Inactive => ChordState::Inactive,
+            ChordState::Active if exact => ChordState::Active,
+            ChordState::Active if chord_held => {
+                out.push(HotkeyEvent::Interrupted);
+                ChordState::Interrupted
+            }
+            ChordState::Active | ChordState::Interrupted if !chord_held => {
+                out.push(HotkeyEvent::Up);
+                ChordState::Inactive
+            }
+            s => s,
+        };
+        (out, mods)
+    }
+
+    /// Whether the chord is currently held (e.g. to suppress the Start menu).
+    pub fn active(&self) -> bool {
+        self.state == ChordState::Active
+    }
+}
+
 #[derive(Copy, Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum Activation {
@@ -429,6 +552,84 @@ mod tests {
         assert_eq!(r.on_event(&HotkeyEvent::Up, at(t, 50)), Some(Intent::Lock));
         assert_eq!(r.on_event(&HotkeyEvent::Down, at(t, 3000)), None);
         assert_eq!(r.on_event(&HotkeyEvent::Up, at(t, 3050)), Some(Intent::Finish));
+    }
+
+    struct TestMap;
+    impl KeyMap for TestMap {
+        fn modifier_of(&self, code: u32) -> Option<Mods> {
+            match code {
+                1 => Some(Mods::CTRL),
+                2 => Some(Mods::SUPER),
+                3 => Some(Mods::SHIFT),
+                _ => None,
+            }
+        }
+        fn name_of(&self, code: u32) -> Option<String> {
+            match code {
+                10 => Some("Space".into()),
+                11 => Some("Left".into()),
+                _ => None,
+            }
+        }
+        fn code_of(&self, name: &str) -> Option<u32> {
+            match name {
+                "Space" => Some(10),
+                "Left" => Some(11),
+                _ => None,
+            }
+        }
+        fn is_escape(&self, code: u32) -> bool {
+            code == 99
+        }
+    }
+
+    fn feed(t: &mut ChordTracker, keys: &mut std::collections::HashSet<u32>, code: u32, down: bool, chord: &Chord, capturing: bool) -> Vec<HotkeyEvent> {
+        if down {
+            keys.insert(code);
+        } else {
+            keys.remove(&code);
+        }
+        t.update(&TestMap, keys, down.then_some(code), Some(chord), capturing).0
+    }
+
+    #[test]
+    fn tracker_modifier_only_chord() {
+        let chord: Chord = "Ctrl+Super".parse().unwrap();
+        let (mut t, mut k) = (ChordTracker::default(), Default::default());
+        assert!(feed(&mut t, &mut k, 1, true, &chord, false).is_empty());
+        assert_eq!(feed(&mut t, &mut k, 2, true, &chord, false), vec![HotkeyEvent::Down]);
+        assert_eq!(feed(&mut t, &mut k, 2, false, &chord, false), vec![HotkeyEvent::Up]);
+        assert!(feed(&mut t, &mut k, 1, false, &chord, false).is_empty());
+    }
+
+    #[test]
+    fn tracker_interruption_then_release() {
+        let chord: Chord = "Ctrl+Super".parse().unwrap();
+        let (mut t, mut k) = (ChordTracker::default(), Default::default());
+        feed(&mut t, &mut k, 1, true, &chord, false);
+        feed(&mut t, &mut k, 2, true, &chord, false);
+        // Ctrl+Super+Left: another shortcut.
+        assert_eq!(feed(&mut t, &mut k, 11, true, &chord, false), vec![HotkeyEvent::Interrupted]);
+        assert!(feed(&mut t, &mut k, 11, false, &chord, false).is_empty());
+        assert_eq!(feed(&mut t, &mut k, 1, false, &chord, false), vec![HotkeyEvent::Up]);
+    }
+
+    #[test]
+    fn tracker_key_chord_and_capture() {
+        let chord: Chord = "Ctrl+Space".parse().unwrap();
+        let (mut t, mut k) = (ChordTracker::default(), Default::default());
+        feed(&mut t, &mut k, 1, true, &chord, false);
+        assert_eq!(feed(&mut t, &mut k, 10, true, &chord, false), vec![HotkeyEvent::Down]);
+        assert_eq!(feed(&mut t, &mut k, 10, false, &chord, false), vec![HotkeyEvent::Up]);
+        feed(&mut t, &mut k, 1, false, &chord, false);
+        // Capture Shift+Super+Space.
+        feed(&mut t, &mut k, 3, true, &chord, true);
+        feed(&mut t, &mut k, 2, true, &chord, true);
+        feed(&mut t, &mut k, 10, true, &chord, true);
+        feed(&mut t, &mut k, 10, false, &chord, true);
+        feed(&mut t, &mut k, 2, false, &chord, true);
+        let ev = feed(&mut t, &mut k, 3, false, &chord, true);
+        assert_eq!(ev, vec![HotkeyEvent::Captured("Shift+Super+Space".parse().unwrap())]);
     }
 
     #[test]
