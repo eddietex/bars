@@ -42,8 +42,9 @@ jobs:
 
   linux-tarball:
     name: Linux (tarball)
-    # Older glibc so the binary runs on more distros.
-    runs-on: ubuntu-22.04
+    # The prebuilt ONNX Runtime needs glibc >= 2.38 / GCC 13 libstdc++, so
+    # this tarball targets 2024+ distros. The Flatpak covers everything else.
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
       - name: System dependencies

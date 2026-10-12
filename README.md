@@ -109,7 +109,7 @@ pushed and attaches the results to a draft GitHub Release:
 
 | Platform | Artifact |
 | --- | --- |
-| Linux | `bars-x86_64.flatpak` (bundle) and `bars-linux-x86_64.tar.gz` |
+| Linux | `bars-x86_64.flatpak` (any distro) and `bars-linux-x86_64.tar.gz` (glibc 2.38+: Fedora 39+, Ubuntu 24.04+, Debian 13+) |
 | Windows | NSIS installer (`.exe`, per-user, no admin needed) |
 | macOS | `.dmg` (Apple Silicon, currently unsigned) |
 
