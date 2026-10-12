@@ -45,3 +45,11 @@ icons = [
 [package.metadata.packager.macos]
 minimum-system-version = "12.0"
 info-plist-path = "../../packaging/macos/Info.plist"
+
+# Installer window: 768x576 pt background (Retina TIFF built in CI from
+# dmg-background.png + @2x), app on the left of the arrow, Applications right.
+[package.metadata.packager.dmg]
+background = "../../packaging/macos/dmg-background.tiff"
+window-size = { width = 768, height = 576 }
+app-position = { x = 236, y = 354 }
+application-folder-position = { x = 536, y = 354 }

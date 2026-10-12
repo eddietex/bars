@@ -89,6 +89,10 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - run: cargo install cargo-packager --locked --version 0.11.8
       - run: cargo build --release -p bars --locked
+      - name: Retina DMG background
+        run: |
+          tiffutil -cathidpicheck packaging/macos/dmg-background.png \
+            packaging/macos/dmg-background@2x.png -out packaging/macos/dmg-background.tiff
       # Unsigned for now: add a Developer ID + notarization secrets to sign.
       - run: cargo packager --release -p bars --formats dmg
       - uses: actions/upload-artifact@v4
