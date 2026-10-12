@@ -17,9 +17,10 @@ const MANIFEST: &str = "https://github.com/hink/bars/releases/latest/download/la
 /// Where to download by hand.
 pub const RELEASE_PAGE: &str = "https://github.com/hink/bars/releases/latest";
 /// Public half of the key updates are signed with: the contents of the
-/// `.pub` file from `cargo packager signer generate`. Empty: updates can't
-/// be verified, so none are installed (the release page opens instead).
-const PUBLIC_KEY: &str = "";
+/// `.pub` file from `cargo packager signer generate` (minisign key
+/// EF7F31A8EDF9A6B4). Empty: updates can't be verified, so none are
+/// installed (the release page opens instead).
+const PUBLIC_KEY: &str = "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IEVGN0YzMUE4RURGOUE2QjQKUldTMHB2bnRxREYvN3dYcThOUVZqTjVvK2pOYUhBczQ0d2tQNjlFTU1lekNGUUpFYS8wd0MyM0sK";
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Release {
