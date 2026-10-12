@@ -475,13 +475,8 @@ pub fn open(state: Entity<AppState>, cx: &mut App) -> Option<WindowHandle<Overla
         titlebar: None,
         kind: WindowKind::PopUp,
         window_bounds: Some(WindowBounds::Windowed(placed)),
-        // Windows: acrylic, cut to the pill by the window region. macOS gets
-        // its blur from a separate backdrop (see overlay_native).
-        window_background: if cfg!(target_os = "windows") {
-            WindowBackgroundAppearance::Blurred
-        } else {
-            WindowBackgroundAppearance::Transparent
-        },
+        // macOS gets its blur from a separate backdrop (see overlay_native).
+        window_background: WindowBackgroundAppearance::Transparent,
         focus: false,
         show: true,
         is_movable: false,

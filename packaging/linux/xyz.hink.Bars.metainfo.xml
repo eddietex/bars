@@ -22,6 +22,10 @@
     </ul>
   </description>
   <launchable type="desktop-id">xyz.hink.Bars.desktop</launchable>
+  <categories>
+    <category>Utility</category>
+    <category>Accessibility</category>
+  </categories>
   <icon type="stock">xyz.hink.Bars</icon>
   <content_rating type="oars-1.1"/>
   <supports>
@@ -32,6 +36,16 @@
     <internet>first-run</internet>
   </requires>
   <releases>
+    <release version="0.2.0" date="2026-10-12">
+      <description>
+        <p>Windows and macOS: global shortcut, typing and pasting, tray, setup assistant, launch at login, and the dictation pill.</p>
+        <ul>
+          <li>macOS: Fn (Globe) works as a shortcut; menu-bar app without a Dock icon.</li>
+          <li>Arm64 builds for Linux and Windows.</li>
+          <li>The setup assistant notices permissions granted in system settings.</li>
+        </ul>
+      </description>
+    </release>
     <release version="0.1.0" date="2026-10-11">
       <description><p>First release.</p></description>
     </release>

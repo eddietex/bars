@@ -1,11 +1,12 @@
 //! Windows/macOS overlay behaviour GPUI doesn't expose: clicks pass through
-//! everything but the pill, the glass behind the pill is blurred, and the
-//! pill shows up on the screen you're working on.
+//! everything but the pill, and the pill shows up on the screen you're
+//! working on. On macOS the glass behind the pill is blurred too.
 //!
-//! Blur: Windows blurs the whole window (acrylic), so the window region,
-//! which also clips drawing, cuts it to the pill. macOS can only blur
-//! rectangles per window, so a borderless child window with a capsule-masked
-//! visual-effect view sits right behind the pill.
+//! Blur: macOS can only blur rectangles per window, so a borderless child
+//! window with a capsule-masked visual-effect view sits right behind the
+//! pill. Windows has no equivalent yet: its acrylic backdrop covers the whole
+//! window and the window region doesn't clip it (it showed as a dark box
+//! around the pill), so the Windows pill is translucent without blur.
 //!
 //! Calls that make the OS notify the window (moves, resizes) run on a
 //! foreground task, outside GPUI's render pass, so its callbacks can't
@@ -68,6 +69,9 @@ impl NativeOverlay {
                 ns_window.setIgnoresMouseEvents(ignore);
             }
             if self.backdrop.as_ref().is_none_or(|b| !b.belongs_to(&ns_window)) {
+                // AppKit outlines the whole (invisible) window with its
+                // shadow; the pill draws its own.
+                ns_window.setHasShadow(false);
                 self.backdrop = mac::Backdrop::new(&ns_window);
             }
             if let Some(backdrop) = &mut self.backdrop {
@@ -150,9 +154,8 @@ mod win {
         }
     }
 
-    /// Window region: the pill's capsule, or nothing. It limits both clicks
-    /// (elsewhere they reach the windows below) and drawing, including the
-    /// acrylic blur.
+    /// Window region: the pill (with room for its edge and shadow), or
+    /// nothing. Outside it, clicks go to the windows below.
     pub fn set_region(hwnd: isize, pill: Option<Bounds<Pixels>>, scale: f32) {
         let px = |v: f32| (v * scale).round() as i32;
         unsafe {
@@ -160,8 +163,7 @@ mod win {
                 Some(b) => {
                     let (x, y) = (f32::from(b.origin.x), f32::from(b.origin.y));
                     let (w, h) = (f32::from(b.size.width), f32::from(b.size.height));
-                    // Region edges are exclusive, hence the extra pixel.
-                    CreateRoundRectRgn(px(x), px(y), px(x + w) + 1, px(y + h) + 1, px(h), px(h))
+                    CreateRoundRectRgn(px(x - 6.), px(y - 4.), px(x + w + 6.), px(y + h + 10.), px(h + 10.), px(h + 10.))
                 }
                 None => CreateRectRgn(0, 0, 0, 0),
             };

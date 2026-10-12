@@ -139,7 +139,7 @@ crates/bars-core   engine, audio, hotkeys, text injection, config, history
                       win/ (keyboard hook), mac/ (event tap, TCC permissions),
                       native_inject.rs (Windows/macOS paste + typing)
 crates/bars        GPUI app: tray, overlay pill, settings window
-  src/overlay_native.rs  Windows/macOS pill: click-through, blur, active screen
+  src/overlay_native.rs  Windows/macOS pill: click-through, active screen, blur (macOS)
   src/ipc_*.rs          single instance + CLI (D-Bus on Linux, local socket elsewhere)
 third_party/        gpui-pre-linux with a Wayland frame-waker fix (see patch)
 packaging/          .desktop, AppStream, icons (from artwork/), udev rule, Flatpak manifest, macOS Info.plist

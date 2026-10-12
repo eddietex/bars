@@ -14,6 +14,34 @@ public static class Fg {
     [DllImport("user32.dll", CharSet = CharSet.Unicode)] static extern int GetWindowText(IntPtr h, StringBuilder s, int n);
     public static string Title() { var s = new StringBuilder(256); GetWindowText(GetForegroundWindow(), s, 256); return s.ToString(); }
 }
+public static class Win {
+    public struct RECT { public int L, T, R, B; }
+    public struct POINT { public int X, Y; }
+    delegate bool EnumProc(IntPtr h, IntPtr l);
+    [DllImport("user32.dll")] static extern bool EnumWindows(EnumProc f, IntPtr l);
+    [DllImport("user32.dll")] static extern uint GetWindowThreadProcessId(IntPtr h, out uint pid);
+    [DllImport("user32.dll")] static extern bool GetWindowRect(IntPtr h, out RECT r);
+    [DllImport("user32.dll")] static extern bool IsWindowVisible(IntPtr h);
+    [DllImport("user32.dll")] static extern IntPtr WindowFromPoint(POINT p);
+    [DllImport("user32.dll")] static extern IntPtr GetAncestor(IntPtr h, uint flags);
+    [DllImport("user32.dll")] static extern int GetWindowRgnBox(IntPtr h, out RECT r);
+    // The overlay: a visible, wide but short window of the given process.
+    public static IntPtr Overlay(uint pid) {
+        IntPtr found = IntPtr.Zero;
+        EnumWindows((h, l) => {
+            uint p; GetWindowThreadProcessId(h, out p);
+            RECT r;
+            if (p == pid && IsWindowVisible(h) && GetWindowRect(h, out r) && r.B - r.T < 120 && r.R - r.L > 300) { found = h; return false; }
+            return true;
+        }, IntPtr.Zero);
+        return found;
+    }
+    public static int[] Rect(IntPtr h) { RECT r; GetWindowRect(h, out r); return new[] { r.L, r.T, r.R, r.B }; }
+    // Region type (0 none, 1 empty, 2 simple, 3 complex) and its bounding box.
+    public static string Region(IntPtr h) { RECT r; int t = GetWindowRgnBox(h, out r); return t + " [" + r.L + "," + r.T + " " + r.R + "," + r.B + "]"; }
+    // The top-level window that receives a click at (x, y).
+    public static IntPtr At(int x, int y) { var p = new POINT { X = x, Y = y }; return GetAncestor(WindowFromPoint(p), 2); }
+}
 '@
 
 function Shot($name) {
@@ -70,6 +98,16 @@ Write-Host '== overlay'
 Bars '--toggle'
 Start-Sleep 2
 Shot '3-overlay'
+$overlay = [Win]::Overlay([uint32]$app.Id)
+if ($overlay -eq [IntPtr]::Zero) { throw 'overlay window not found' }
+$r = [Win]::Rect($overlay)
+Write-Host "overlay at $($r -join ','), region $([Win]::Region($overlay))"
+# Outside the pill clicks must reach the window below; on it, the pill.
+$outside = [Win]::At($r[0] + 3, $r[1] + 3)
+$onPill = [Win]::At([int](($r[0] + $r[2]) / 2), $r[1] + 28)
+Write-Host "click outside pill -> $outside, on pill -> $onPill, overlay = $overlay"
+if ($outside -eq $overlay) { throw 'clicks outside the pill hit the overlay (no click-through)' }
+if ($onPill -ne $overlay) { throw 'the pill itself is not clickable' }
 Bars '--cancel'
 Start-Sleep 1
 

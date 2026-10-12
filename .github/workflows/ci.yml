@@ -5,6 +5,12 @@ on:
     branches: [main]
   pull_request:
   workflow_dispatch:
+    inputs:
+      platform:
+        description: "Windows/macOS build + smoke test to run"
+        type: choice
+        options: [all, Windows, macOS]
+        default: all
 
 concurrency:
   group: ci-${{ github.ref }}
@@ -40,6 +46,9 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
+        name: [Windows, macOS]
+        exclude:
+          - name: ${{ inputs.platform == 'Windows' && 'macOS' || (inputs.platform == 'macOS' && 'Windows' || 'none') }}
         include:
           - { name: Windows, os: windows-latest, smoke: pwsh scripts/smoke/windows.ps1 }
           - { name: macOS, os: macos-14, smoke: bash scripts/smoke/macos.sh }
