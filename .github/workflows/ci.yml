@@ -47,19 +47,18 @@ jobs:
       fail-fast: false
       matrix:
         name: [Windows, macOS]
+        # (An `include` would add an excluded platform back, so the runner
+        # and script are picked by name below.)
         exclude:
           - name: ${{ inputs.platform == 'Windows' && 'macOS' || (inputs.platform == 'macOS' && 'Windows' || 'none') }}
-        include:
-          - { name: Windows, os: windows-latest, smoke: pwsh scripts/smoke/windows.ps1 }
-          - { name: macOS, os: macos-14, smoke: bash scripts/smoke/macos.sh }
-    runs-on: ${{ matrix.os }}
+    runs-on: ${{ matrix.name == 'Windows' && 'windows-latest' || 'macos-14' }}
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - run: cargo build -p bars --locked
       - name: Smoke test
-        run: ${{ matrix.smoke }}
+        run: ${{ matrix.name == 'Windows' && 'pwsh scripts/smoke/windows.ps1' || 'bash scripts/smoke/macos.sh' }}
       - uses: actions/upload-artifact@v4
         if: always()
         with:
