@@ -5,6 +5,7 @@
 use std::collections::HashSet;
 use std::ffi::c_void;
 
+use core_foundation::array::CFArray;
 use core_foundation::base::{CFType, CFTypeRef, TCFType};
 use core_foundation::boolean::CFBoolean;
 use core_foundation::number::CFNumber;
@@ -106,6 +107,19 @@ impl Element {
             .then_some((r.location as i64, r.length as i64))
     }
 
+    fn param(&self, name: &'static str, input: &CFType) -> Option<CFType> {
+        let mut value: CFTypeRef = std::ptr::null();
+        let name = CFString::from_static_string(name);
+        let err = unsafe {
+            AXUIElementCopyParameterizedAttributeValue(self.raw(), name.as_concrete_TypeRef(), input.as_CFTypeRef(), &mut value)
+        };
+        (err == 0 && !value.is_null()).then(|| unsafe { CFType::wrap_under_create_rule(value) })
+    }
+
+    fn param_string(&self, name: &'static str, input: &CFType) -> Option<String> {
+        Some(self.param(name, input)?.downcast::<CFString>()?.to_string())
+    }
+
     /// The text in a range (UTF-16 units), without reading the whole field.
     fn string_for_range(&self, location: i64, length: i64) -> Option<String> {
         if length <= 0 {
@@ -119,16 +133,14 @@ impl Element {
         if param.is_null() {
             return None;
         }
-        let param = unsafe { CFType::wrap_under_create_rule(param) };
-        let mut value: CFTypeRef = std::ptr::null();
-        let name = CFString::from_static_string("AXStringForRange");
-        let err = unsafe {
-            AXUIElementCopyParameterizedAttributeValue(self.raw(), name.as_concrete_TypeRef(), param.as_CFTypeRef(), &mut value)
-        };
-        if err != 0 || value.is_null() {
-            return None;
-        }
-        Some(unsafe { CFType::wrap_under_create_rule(value) }.downcast::<CFString>()?.to_string())
+        self.param_string("AXStringForRange", &unsafe { CFType::wrap_under_create_rule(param) })
+    }
+
+    /// The text between two text markers.
+    fn string_between(&self, from: &CFType, to: &CFType) -> Option<String> {
+        let pair = CFArray::from_CFTypes(&[from.clone(), to.clone()]);
+        let range = self.param("AXTextMarkerRangeForUnorderedTextMarkers", &pair.as_CFType())?;
+        self.param_string("AXStringForTextMarkerRange", &range)
     }
 
     fn set_true(&self, name: &'static str) {
@@ -179,6 +191,31 @@ fn terminal_tail(field: &Element, chars: usize) -> Option<Surroundings> {
     Some(Surroundings { before, selected: String::new(), after: String::new() })
 }
 
+/// Rich text editors in web content (contenteditable in Firefox, for one)
+/// can report no character range for the cursor, only text markers, the
+/// macOS API for web text that WebKit, Gecko and Chromium all implement.
+/// Reads the cursor's paragraph through those, inside editable content only.
+fn marker_surroundings(field: &Element, chars: usize) -> Option<Surroundings> {
+    field.attr("AXEditableAncestor")?;
+    let selection = field.attr("AXSelectedTextMarkerRange")?;
+    let start = field.param("AXStartTextMarkerForTextMarkerRange", &selection)?;
+    let end = field.param("AXEndTextMarkerForTextMarkerRange", &selection)?;
+    let paragraph = |marker: &CFType, edge: &'static str| {
+        let range = field.param("AXParagraphTextMarkerRangeForTextMarker", marker)?;
+        field.param(edge, &range)
+    };
+    let before = field.string_between(&paragraph(&start, "AXStartTextMarkerForTextMarkerRange")?, &start)?;
+    let after = paragraph(&end, "AXEndTextMarkerForTextMarkerRange")
+        .and_then(|para_end| field.string_between(&end, &para_end))
+        .unwrap_or_default();
+    let skip = before.chars().count().saturating_sub(chars);
+    Some(Surroundings {
+        before: before.chars().skip(skip).collect(),
+        selected: field.param_string("AXStringForTextMarkerRange", &selection).unwrap_or_default(),
+        after: after.chars().take(chars).collect(),
+    })
+}
+
 fn surroundings(field: &Element, chars: usize, terminal: bool) -> Option<Surroundings> {
     let role = field.string("AXRole");
     let subrole = field.string("AXSubrole");
@@ -188,7 +225,9 @@ fn surroundings(field: &Element, chars: usize, terminal: bool) -> Option<Surroun
     if terminal {
         return terminal_tail(field, chars);
     }
-    let (location, length) = field.range("AXSelectedTextRange")?;
+    let Some((location, length)) = field.range("AXSelectedTextRange") else {
+        return marker_surroundings(field, chars);
+    };
     let (end, n) = (location + length, chars as i64);
     let count = field.int("AXNumberOfCharacters");
     if count.is_some_and(|c| c <= READ_WHOLE_UP_TO) {

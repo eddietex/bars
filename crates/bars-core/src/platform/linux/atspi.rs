@@ -162,7 +162,13 @@ impl A11y {
             return None;
         }
         let count = self.int(bus, path, TEXT, "CharacterCount")?;
-        let caret = self.int(bus, path, TEXT, "CaretOffset")?.clamp(0, count);
+        // -1: the caret is in a child object (a paragraph of a rich text
+        // editor), so the text around it is unknown, not the field's start.
+        let caret = self.int(bus, path, TEXT, "CaretOffset")?;
+        if caret < 0 {
+            return None;
+        }
+        let caret = caret.min(count);
         let selections: i32 = self.call(bus, path, TEXT, "GetNSelections", &()).unwrap_or(0);
         let (start, end) = if selections > 0 {
             let (a, b): (i32, i32) = self.call(bus, path, TEXT, "GetSelection", &(0i32,))?;
