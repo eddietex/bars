@@ -28,11 +28,12 @@ env:
 jobs:
   flatpak:
     name: Linux (Flatpak, ${{ matrix.arch }})
+    # x86_64 only for now. Arm64 builds on native runners worked (v0.2.0):
+    # add { arch: aarch64, runner: ubuntu-24.04-arm } to bring them back.
     strategy:
       matrix:
         include:
           - { arch: x86_64, runner: ubuntu-24.04 }
-          - { arch: aarch64, runner: ubuntu-24.04-arm }
     if: inputs.only == '' || inputs.only == 'all' || inputs.only == 'Linux'
     runs-on: ${{ matrix.runner }}
     container:
@@ -56,11 +57,11 @@ jobs:
     name: Linux (tarball, ${{ matrix.arch }})
     # The prebuilt ONNX Runtime needs glibc >= 2.38 / GCC 13 libstdc++, so
     # this tarball targets 2024+ distros. The Flatpak covers everything else.
+    # x86_64 only for now (see the Flatpak job for arm64).
     strategy:
       matrix:
         include:
           - { arch: x86_64, runner: ubuntu-24.04 }
-          - { arch: aarch64, runner: ubuntu-24.04-arm }
     if: inputs.only == '' || inputs.only == 'all' || inputs.only == 'Linux'
     runs-on: ${{ matrix.runner }}
     steps:
@@ -93,25 +94,18 @@ jobs:
 
   windows:
     name: Windows (installer, ${{ matrix.arch }})
+    # x64 only for now. Arm64 worked on windows-11-arm (v0.2.0) with clang
+    # installed for ring: add { arch: arm64, runner: windows-11-arm } and a
+    # step that runs `choco install llvm` when clang is missing.
     strategy:
       matrix:
         include:
           - { arch: x64, runner: windows-latest }
-          - { arch: arm64, runner: windows-11-arm }
     if: inputs.only == '' || inputs.only == 'all' || inputs.only == 'Windows'
     runs-on: ${{ matrix.runner }}
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
-      # ring (TLS) builds its Arm assembly with clang.
-      - name: Clang (arm64)
-        if: matrix.arch == 'arm64'
-        shell: pwsh
-        run: |
-          if (-not (Get-Command clang -ErrorAction SilentlyContinue)) {
-            choco install llvm -y --no-progress
-            "C:\Program Files\LLVM\bin" | Out-File -Append -Encoding utf8 $env:GITHUB_PATH
-          }
       - uses: Swatinem/rust-cache@v2
       - run: cargo install cargo-packager --locked --version 0.11.8
       - run: cargo build --release -p bars --locked

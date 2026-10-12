@@ -109,8 +109,8 @@ pushed and attaches the results to a draft GitHub Release:
 
 | Platform | Artifact |
 | --- | --- |
-| Linux | `bars-{x86_64,aarch64}.flatpak` (any distro) and `bars-linux-{x86_64,aarch64}.tar.gz` (glibc 2.38+: Fedora 39+, Ubuntu 24.04+, Debian 13+) |
-| Windows | NSIS installer for x64 and arm64 (`.exe`, per-user, no admin needed) |
+| Linux | `bars-x86_64.flatpak` (any distro) and `bars-linux-x86_64.tar.gz` (glibc 2.38+: Fedora 39+, Ubuntu 24.04+, Debian 13+) |
+| Windows | NSIS installer for x64 (`.exe`, per-user, no admin needed) |
 | macOS | `.dmg` (Apple Silicon; ONNX Runtime no longer ships Intel Mac builds) |
 
 ```sh

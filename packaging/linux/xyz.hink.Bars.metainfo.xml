@@ -42,6 +42,7 @@
           <li>macOS: no longer crashes when inserting text after dictation.</li>
           <li>macOS: setup asks only for Accessibility, and Allow access opens its settings.</li>
           <li>macOS: the disk image shows its background and layout again.</li>
+          <li>Arm64 builds for Linux and Windows are paused.</li>
         </ul>
       </description>
     </release>
