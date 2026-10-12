@@ -20,6 +20,17 @@ rm -rf dist/*.app
 cargo packager --release -p bars --formats app
 app=$(ls -d dist/*.app | head -1)
 
+# Sign the whole app, not just the executable (the linker's ad hoc
+# signature leaves Info.plist and resources unsealed, which macOS reports
+# as "damaged" for a downloaded copy). CI signs with the self-signed
+# certificate (scripts/macos-signing-keychain.sh): one identity across
+# releases keeps Accessibility and Microphone access through updates.
+# Elsewhere: ad hoc.
+identity="${BARS_SIGNING_IDENTITY:--}"
+codesign --force --sign "$identity" --timestamp=none "$app"
+codesign --verify --strict --verbose=2 "$app"
+codesign --display --requirements - "$app"
+
 if [ ! -x .dmgbuild/bin/dmgbuild ]; then
   python3 -m venv .dmgbuild
   .dmgbuild/bin/pip install --quiet 'dmgbuild>=1.6,<2'

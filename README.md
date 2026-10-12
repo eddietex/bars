@@ -126,10 +126,14 @@ pushed and attaches the results to a draft GitHub Release:
 git tag v0.1.0 && git push origin v0.1.0
 ```
 
-Windows and macOS builds are unsigned for now, so SmartScreen and Gatekeeper
-warn on first launch, and after an update macOS may need Bars removed from
-and re-added to the Accessibility list. Signing needs a code-signing
-certificate (Windows) and a Developer ID with notarization (macOS).
+The Windows build is unsigned, so SmartScreen warns on first launch. The
+macOS app is signed with a self-signed certificate (secrets
+`MACOS_SIGNING_P12` and `MACOS_SIGNING_PASSWORD`; see
+`scripts/macos-signing-keychain.sh`): Gatekeeper still asks once (System
+Settings > Privacy & Security > Open Anyway), but every release carries the
+same identity, so macOS keeps Accessibility and Microphone access across
+updates. Without the secrets the app is signed ad hoc. Opening without any
+prompt needs an Apple Developer ID with notarization.
 
 CI (Actions > CI > Run workflow) also builds Windows and macOS and runs
 `scripts/smoke`: the app is started on a real runner, driven through its

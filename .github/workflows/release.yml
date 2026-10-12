@@ -139,9 +139,15 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - run: cargo install cargo-packager --locked --version 0.11.8
       - run: cargo build --release -p bars --locked
-      # Bars.app via cargo-packager, the DMG (with its Finder layout) via
-      # dmgbuild. Unsigned for now: add a Developer ID + notarization secrets
-      # to sign.
+      # Self-signed (not notarized): one identity across releases, so macOS
+      # keeps Bars' permissions through updates. Skipped without the secrets.
+      - name: Signing certificate
+        env:
+          P12: ${{ secrets.MACOS_SIGNING_P12 }}
+          P12_PASSWORD: ${{ secrets.MACOS_SIGNING_PASSWORD }}
+        run: bash scripts/macos-signing-keychain.sh
+      # Bars.app via cargo-packager (signed in the script), the DMG (with its
+      # Finder layout) via dmgbuild.
       - run: bash scripts/package-macos.sh
       - uses: actions/upload-artifact@v4
         with:
