@@ -26,6 +26,7 @@ rubato = "5"
 # certificates are installed system-wide.
 ureq = { version = "3", default-features = false, features = ["rustls", "gzip", "platform-verifier"] }
 sha2 = "0.10"
+semver = "1"
 transcribe-rs = { version = "0.3.12", features = ["onnx"] }
 
 [dev-dependencies]
@@ -46,6 +47,8 @@ wayland-protocols-wlr = { version = "0.3", features = ["client"] }
 
 [target.'cfg(any(target_os = "windows", target_os = "macos"))'.dependencies]
 enigo = "0.6"
+# Installs updates on request (verifies the download, replaces the app).
+cargo-packager-updater = "0.2"
 arboard = { version = "3.6", default-features = false }
 
 [target.'cfg(target_os = "windows")'.dependencies]

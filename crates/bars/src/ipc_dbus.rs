@@ -31,6 +31,11 @@ impl Service {
         let _ = self.tx.send(ShellCommand::ShowSettings(None)).await;
     }
 
+    /// Install the update found, or look for one.
+    async fn update(&self) {
+        let _ = self.tx.send(ShellCommand::Update).await;
+    }
+
     async fn quit(&self) {
         let _ = self.tx.send(ShellCommand::Quit).await;
     }

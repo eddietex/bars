@@ -185,13 +185,9 @@ pub fn find(id: &str) -> Option<&'static ModelInfo> {
 /// Progress callback: (bytes done, bytes total).
 pub type Progress<'a> = &'a mut dyn FnMut(u64, u64);
 
-/// Downloads every file of `model` into its directory. Files are written to
-/// `*.part` and renamed on completion, so an interrupted download never
-/// looks installed. Already-complete files are skipped.
-pub fn download(model: &ModelInfo, cancel: Arc<AtomicBool>, progress: Progress) -> anyhow::Result<()> {
-    let dir = model.dir();
-    std::fs::create_dir_all(&dir)?;
-    let agent = ureq::Agent::config_builder()
+/// HTTP client for downloads and update checks.
+pub(crate) fn http_agent() -> ureq::Agent {
+    ureq::Agent::config_builder()
         .user_agent(concat!("Bars/", env!("CARGO_PKG_VERSION")))
         // The system's trusted certificates, not just Mozilla's bundled list.
         .tls_config(
@@ -200,7 +196,16 @@ pub fn download(model: &ModelInfo, cancel: Arc<AtomicBool>, progress: Progress) 
                 .build(),
         )
         .build()
-        .new_agent();
+        .new_agent()
+}
+
+/// Downloads every file of `model` into its directory. Files are written to
+/// `*.part` and renamed on completion, so an interrupted download never
+/// looks installed. Already-complete files are skipped.
+pub fn download(model: &ModelInfo, cancel: Arc<AtomicBool>, progress: Progress) -> anyhow::Result<()> {
+    let dir = model.dir();
+    std::fs::create_dir_all(&dir)?;
+    let agent = http_agent();
 
     let total = model.size_bytes();
     let mut done_before = 0u64;

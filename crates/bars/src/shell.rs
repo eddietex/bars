@@ -11,7 +11,7 @@ use crate::brand::TrayState;
 use crate::onboarding::{self, Step};
 use crate::overlay::{self, Overlay};
 use crate::settings::{self, Page};
-use crate::state::{AppState, StateEvent};
+use crate::state::{AppState, StateEvent, UpdateStatus};
 use crate::theme;
 
 #[derive(Clone, Debug)]
@@ -23,6 +23,8 @@ pub enum ShellCommand {
     ShowSettings(Option<Page>),
     /// Open the setup assistant (at the first unfinished step).
     ShowOnboarding,
+    /// Install the update found, or look for one.
+    Update,
     Quit,
 }
 
@@ -36,6 +38,11 @@ pub enum Launch {
 }
 
 const SETUP_NOTIFICATION: &str = "bars-setup";
+const UPDATE_NOTIFICATION: &str = "bars-update";
+/// How often to look for a newer Bars (when allowed), and how long after
+/// starting to look first.
+const UPDATE_EVERY: Duration = Duration::from_secs(24 * 60 * 60);
+const UPDATE_FIRST: Duration = Duration::from_secs(60);
 
 /// Lets any view ask the shell for something (open a window, etc).
 pub struct ShellSender(pub async_channel::Sender<ShellCommand>);
@@ -87,12 +94,17 @@ impl Shell {
 
         let tray = crate::tray::TrayHandle::spawn(tray_tx);
 
-        // Notification buttons ("Finish setup") come back here.
+        // Notification buttons ("Finish setup", "Update") come back here.
         let weak = cx.weak_entity();
         cx.on_system_notification_response(move |response, cx| {
-            if response.tag.as_ref() == SETUP_NOTIFICATION {
-                let _ = weak.update(cx, |this, cx| this.show_onboarding(cx));
-            }
+            let _ = weak.update(cx, |this, cx| match response.tag.as_ref() {
+                SETUP_NOTIFICATION => this.show_onboarding(cx),
+                UPDATE_NOTIFICATION if response.action_id.is_some() => {
+                    this.state.update(cx, |s, cx| s.install_update(cx))
+                }
+                UPDATE_NOTIFICATION => this.show_settings(Some(Page::General), cx),
+                _ => {}
+            });
         });
 
         Shell {
@@ -155,6 +167,24 @@ impl Shell {
                 }
             }
             StateEvent::ThemeChanged => self.apply_theme(cx),
+            StateEvent::UpdateFound => self.notify_update(cx),
+            StateEvent::UpdateResult => {
+                if !self.settings_window_active(cx) {
+                    self.notify_update(cx);
+                }
+            }
+            StateEvent::UpdateInstalled => {
+                #[cfg(target_os = "macos")]
+                if let Err(e) = bars_core::update::relaunch_after_exit() {
+                    log::error!("could not restart into the update: {e:#}");
+                }
+                self.on_command(ShellCommand::Quit, cx);
+                return;
+            }
+        }
+        if let Some(t) = &mut self.tray {
+            let st = self.state.read(cx);
+            t.set_update(st.update.offered().map(|r| r.version.clone()));
         }
         let needs = {
             let st = self.state.read(cx);
@@ -194,6 +224,54 @@ impl Shell {
             });
         })
         .detach();
+
+        // Look for a newer Bars once a day, when allowed.
+        cx.spawn(async move |this, cx| {
+            cx.background_executor().timer(UPDATE_FIRST).await;
+            loop {
+                let alive = this.update(cx, |this, cx| {
+                    if this.state.read(cx).config.ui.check_updates {
+                        this.state.update(cx, |s, cx| s.check_for_updates(false, cx));
+                    }
+                });
+                if alive.is_err() {
+                    break;
+                }
+                cx.background_executor().timer(UPDATE_EVERY).await;
+            }
+        })
+        .detach();
+    }
+
+    /// Tells the user what looking for an update found.
+    fn notify_update(&mut self, cx: &mut Context<Self>) {
+        let current = env!("CARGO_PKG_VERSION");
+        let (title, body, action): (String, String, Option<&str>) = match &self.state.read(cx).update {
+            UpdateStatus::Available(r) => (
+                "New version available".into(),
+                match &r.notes {
+                    Some(notes) => format!("ver. {}: {notes}", r.version),
+                    None => format!("ver. {} is out. You have ver. {current}.", r.version),
+                },
+                Some(update_action()),
+            ),
+            UpdateStatus::UpToDate => ("Bars is up to date".into(), format!("ver. {current} is the latest version."), None),
+            UpdateStatus::InstallFailed(_, why) => ("Bars couldn't update".into(), why.clone(), Some("Try again")),
+            UpdateStatus::Failed(why) => ("Bars couldn't update".into(), why.clone(), None),
+            _ => return,
+        };
+        cx.show_system_notification(SystemNotification {
+            tag: UPDATE_NOTIFICATION.into(),
+            title: title.into(),
+            body: body.into(),
+            actions: action
+                .map(|label| SystemNotificationAction {
+                    id: "update".into(),
+                    label: label.into(),
+                })
+                .into_iter()
+                .collect(),
+        });
     }
 
     fn notify_setup(&mut self, cx: &mut Context<Self>) {
@@ -350,11 +428,29 @@ impl Shell {
             ShellCommand::PasteLast => state.send(Command::PasteLast),
             ShellCommand::ShowSettings(page) => self.show_settings(page, cx),
             ShellCommand::ShowOnboarding => self.show_onboarding(cx),
+            ShellCommand::Update => self.state.update(cx, |s, cx| match s.update {
+                UpdateStatus::Available(_) | UpdateStatus::InstallFailed(..) => s.install_update(cx),
+                _ => s.check_for_updates(true, cx),
+            }),
             ShellCommand::Quit => {
                 state.send(Command::Shutdown);
                 cx.quit();
             }
         }
+    }
+}
+
+/// What updating does here: installs, or opens the release page.
+pub fn update_action() -> &'static str {
+    if bars_core::update::can_install() { "Update" } else { "Download" }
+}
+
+/// The tray's update item: "Update to ver. 0.4.0…" once one is found.
+pub fn update_label(version: Option<&str>) -> String {
+    match version {
+        Some(v) if bars_core::update::can_install() => format!("Update to ver. {v}…"),
+        Some(v) => format!("Download ver. {v}…"),
+        None => "Check for Updates…".into(),
     }
 }
 

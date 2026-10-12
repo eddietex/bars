@@ -44,6 +44,7 @@ pub fn claim(tx: async_channel::Sender<ShellCommand>) -> anyhow::Result<Option<I
                     "Cancel" => ShellCommand::Cancel,
                     "PasteLast" => ShellCommand::PasteLast,
                     "ShowSettings" => ShellCommand::ShowSettings(None),
+                    "Update" => ShellCommand::Update,
                     "Quit" => ShellCommand::Quit,
                     _ => continue,
                 };

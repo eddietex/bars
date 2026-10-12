@@ -18,6 +18,7 @@ const MODIFIER_ONLY_HINT: &str = "Works in every app. Modifier-only shortcuts li
 const SMART_SPACING_HINT: &str = "Reads the text around the cursor to add spaces, match capitalization and drop a final full stop mid-sentence. Works in apps with accessibility support (most GTK apps). Nothing is stored.";
 #[cfg(not(target_os = "linux"))]
 const SMART_SPACING_HINT: &str = "Reads the text around the cursor to add spaces, match capitalization and drop a final full stop mid-sentence. Nothing is stored.";
+use crate::state::UpdateStatus;
 use crate::theme::PaletteExt;
 use crate::widgets::*;
 
@@ -149,6 +150,35 @@ impl SettingsView {
                 move |v, _, cx| set(cx, Box::new(move |c| c.insertion.paste_keys = v))
             },
         );
+
+        // --- Updates ----------------------------------------------------
+        let update = st.update.clone();
+        let update_status = match &update {
+            UpdateStatus::Unknown => "Not checked yet.".to_string(),
+            UpdateStatus::Checking => "Checking…".into(),
+            UpdateStatus::UpToDate => "Up to date.".into(),
+            UpdateStatus::Available(r) => format!("ver. {} is available.", r.version),
+            UpdateStatus::Installing(r) => format!("Installing ver. {}…", r.version),
+            UpdateStatus::InstallFailed(_, why) | UpdateStatus::Failed(why) => why.clone(),
+        };
+        let update_button = match &update {
+            UpdateStatus::Available(_) => button("update", crate::shell::update_action(), ButtonKind::Primary, p),
+            UpdateStatus::InstallFailed(..) => button("update", "Try again", ButtonKind::Primary, p),
+            UpdateStatus::Checking | UpdateStatus::Installing(_) => {
+                button("update", "Check now", ButtonKind::Secondary, p).opacity(0.5)
+            }
+            _ => button("update", "Check now", ButtonKind::Secondary, p),
+        }
+        .on_click({
+            let state = state.clone();
+            move |_, _, cx| {
+                state.update(cx, |s, cx| match s.update {
+                    UpdateStatus::Available(_) | UpdateStatus::InstallFailed(..) => s.install_update(cx),
+                    _ => s.check_for_updates(true, cx),
+                })
+            }
+        });
+        let version = format!("ver. {}", env!("CARGO_PKG_VERSION"));
 
         v_col()
             .child(page_header("Shortcut & input", Some("How you start dictating and where the words go."), p))
@@ -401,6 +431,27 @@ impl SettingsView {
                             p,
                         )
                         .into_any_element(),
+                    ],
+                )),
+            )
+            .child(
+                section("Updates", p).child(rows(
+                    p,
+                    vec![
+                        row(
+                            "Check for updates automatically",
+                            Some("Once a day, Bars fetches a small file from GitHub to see whether a newer version is out. Nothing else is sent, and nothing is installed until you choose to update."),
+                            small_switch("check-updates", cfg.ui.check_updates, {
+                                let set = set.clone();
+                                move |v, _, cx| {
+                                    let v = *v;
+                                    set(cx, Box::new(move |c| c.ui.check_updates = v))
+                                }
+                            }),
+                            p,
+                        )
+                        .into_any_element(),
+                        row(&version, Some(&update_status), update_button, p).into_any_element(),
                     ],
                 )),
             )

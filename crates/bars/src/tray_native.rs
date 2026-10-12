@@ -13,6 +13,8 @@ pub struct TrayHandle {
     icon: TrayIcon,
     toggle: MenuItem,
     setup: MenuItem,
+    update: MenuItem,
+    update_version: Option<String>,
     menu: Menu,
     needs_setup: bool,
 }
@@ -50,6 +52,7 @@ impl TrayHandle {
         let paste = MenuItem::with_id("paste-last", "Paste last transcript", true, None);
         let open = MenuItem::with_id("open", "Open Bars", true, None);
         let setup = MenuItem::with_id("setup", "Finish setup…", true, None);
+        let update = MenuItem::with_id("update", crate::shell::update_label(None), true, None);
         let quit = MenuItem::with_id("quit", "Quit Bars", true, None);
         let menu = Menu::new();
         let built = menu.append_items(&[
@@ -57,6 +60,7 @@ impl TrayHandle {
             &paste,
             &PredefinedMenuItem::separator(),
             &open,
+            &update,
             &PredefinedMenuItem::separator(),
             &quit,
         ]);
@@ -71,6 +75,7 @@ impl TrayHandle {
                 "paste-last" => ShellCommand::PasteLast,
                 "open" => ShellCommand::ShowSettings(None),
                 "setup" => ShellCommand::ShowOnboarding,
+                "update" => ShellCommand::Update,
                 "quit" => ShellCommand::Quit,
                 _ => return,
             };
@@ -111,6 +116,8 @@ impl TrayHandle {
                 icon,
                 toggle,
                 setup,
+                update,
+                update_version: None,
                 menu,
                 needs_setup: false,
             }),
@@ -141,6 +148,14 @@ impl TrayHandle {
             TrayState::Recording => "Bars: listening…",
             TrayState::Busy => "Bars: transcribing…",
         }));
+    }
+
+    /// The newer version on offer, if any.
+    pub fn set_update(&mut self, version: Option<String>) {
+        if version != self.update_version {
+            self.update.set_text(crate::shell::update_label(version.as_deref()));
+            self.update_version = version;
+        }
     }
 
     pub fn set_needs_setup(&mut self, needs: bool) {

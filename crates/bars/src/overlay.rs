@@ -103,7 +103,11 @@ impl Overlay {
                         cx.notify();
                     }
                 }
-                StateEvent::ThemeChanged => {}
+                // Updates are announced by notification, not the pill.
+                StateEvent::ThemeChanged
+                | StateEvent::UpdateFound
+                | StateEvent::UpdateResult
+                | StateEvent::UpdateInstalled => {}
             }),
         ];
         let mut this = Overlay {

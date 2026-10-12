@@ -123,10 +123,24 @@ jobs:
       - run: cargo install cargo-packager --locked --version 0.11.8
       - run: cargo build --release -p bars --locked
       - run: cargo packager --release -p bars --formats nsis
+      # The in-app updater checks downloads against this signature.
+      # Skipped without the key (forks).
+      - name: Sign for the updater
+        shell: bash
+        env:
+          BARS_UPDATER_KEY: ${{ secrets.UPDATER_PRIVATE_KEY }}
+          BARS_UPDATER_KEY_PASSWORD: ${{ secrets.UPDATER_PRIVATE_KEY_PASSWORD }}
+        run: |
+          [ -n "$BARS_UPDATER_KEY" ] || exit 0
+          for f in dist/*-setup.exe; do
+            cargo packager signer sign -k "$BARS_UPDATER_KEY" --password "$BARS_UPDATER_KEY_PASSWORD" "$f"
+          done
       - uses: actions/upload-artifact@v4
         with:
           name: windows-${{ matrix.arch }}
-          path: dist/*.exe
+          path: |
+            dist/*.exe
+            dist/*.exe.sig
 
   # Apple Silicon only: ONNX Runtime no longer ships Intel Mac builds.
   macos:
@@ -147,12 +161,19 @@ jobs:
           P12_PASSWORD: ${{ secrets.MACOS_SIGNING_PASSWORD }}
         run: bash scripts/macos-signing-keychain.sh
       # Bars.app via cargo-packager (signed in the script), the DMG (with its
-      # Finder layout) via dmgbuild.
+      # Finder layout) via dmgbuild, and the in-app updater's archive and
+      # signature (skipped without the key).
       - run: bash scripts/package-macos.sh
+        env:
+          BARS_UPDATER_KEY: ${{ secrets.UPDATER_PRIVATE_KEY }}
+          BARS_UPDATER_KEY_PASSWORD: ${{ secrets.UPDATER_PRIVATE_KEY_PASSWORD }}
       - uses: actions/upload-artifact@v4
         with:
           name: macos
-          path: dist/*.dmg
+          path: |
+            dist/*.dmg
+            dist/*.app.tar.gz
+            dist/*.app.tar.gz.sig
 
   release:
     name: Draft release
@@ -160,10 +181,14 @@ jobs:
     if: startsWith(github.ref, 'refs/tags/v') || (inputs.version != '' && (inputs.only == '' || inputs.only == 'all'))
     runs-on: ubuntu-24.04
     steps:
+      - uses: actions/checkout@v4
       - uses: actions/download-artifact@v4
         with:
           path: artifacts
           merge-multiple: true
+      # What the in-app updater reads: releases/latest/download/latest.json.
+      # A draft is never "latest", so publishing the release offers it.
+      - run: python3 scripts/update-manifest.py "${{ inputs.version || github.ref_name }}" artifacts
       - uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ inputs.version || github.ref_name }}

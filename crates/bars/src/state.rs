@@ -13,6 +13,7 @@ use bars_core::history::{Entry, Stats};
 use bars_core::hotkey::Chord;
 use bars_core::models;
 use bars_core::platform::Permissions;
+use bars_core::update::{self, Release};
 
 /// Mic level, kept separate so 60 Hz updates only re-render the overlay.
 pub struct LevelMeter {
@@ -37,6 +38,36 @@ pub enum StateEvent {
     /// A correction was learned; `AppState::learned` has the pair.
     Learned,
     ThemeChanged,
+    /// A newer release was found; `AppState::update` has it.
+    UpdateFound,
+    /// A check the user asked for found nothing, or installing failed.
+    UpdateResult,
+    /// macOS: the update is in place; restart into it.
+    UpdateInstalled,
+}
+
+/// Where looking for a newer Bars stands.
+#[derive(Clone, Debug, PartialEq)]
+pub enum UpdateStatus {
+    /// Not looked yet this session.
+    Unknown,
+    Checking,
+    UpToDate,
+    Available(Release),
+    Installing(Release),
+    /// Installing failed; it can be tried again.
+    InstallFailed(Release, String),
+    Failed(String),
+}
+
+impl UpdateStatus {
+    /// The newer release on offer: found, installing, or to try again.
+    pub fn offered(&self) -> Option<&Release> {
+        match self {
+            UpdateStatus::Available(r) | UpdateStatus::Installing(r) | UpdateStatus::InstallFailed(r, _) => Some(r),
+            _ => None,
+        }
+    }
 }
 
 pub struct AppState {
@@ -72,6 +103,10 @@ pub struct AppState {
     pub last_transcript: Option<String>,
     pub transcripts: u64,
     pub level: Entity<LevelMeter>,
+    pub update: UpdateStatus,
+    /// The newest version already announced, so a daily check doesn't
+    /// announce it again.
+    update_announced: Option<String>,
 }
 
 impl EventEmitter<StateEvent> for AppState {}
@@ -109,7 +144,87 @@ impl AppState {
                 level: 0.0,
                 updated: Instant::now(),
             }),
+            update: UpdateStatus::Unknown,
+            update_announced: None,
         }
+    }
+
+    /// Looks for a newer release in the background. `asked`: the user asked,
+    /// so the outcome is always reported; otherwise only a version not yet
+    /// announced is.
+    pub fn check_for_updates(&mut self, asked: bool, cx: &mut Context<Self>) {
+        if matches!(self.update, UpdateStatus::Checking | UpdateStatus::Installing(_)) {
+            return;
+        }
+        self.update = UpdateStatus::Checking;
+        cx.notify();
+        cx.spawn(async move |this, cx| {
+            let result = cx.background_executor().spawn(async { update::check() }).await;
+            let _ = this.update(cx, |s, cx| {
+                match result {
+                    Ok(Some(release)) => {
+                        log::info!("Bars {} is available", release.version);
+                        let new = s.update_announced.as_deref() != Some(release.version.as_str());
+                        s.update_announced = Some(release.version.clone());
+                        s.update = UpdateStatus::Available(release);
+                        if asked || new {
+                            cx.emit(StateEvent::UpdateFound);
+                        }
+                    }
+                    Ok(None) => {
+                        s.update = UpdateStatus::UpToDate;
+                        if asked {
+                            cx.emit(StateEvent::UpdateResult);
+                        }
+                    }
+                    Err(e) => {
+                        log::warn!("update check failed: {e:#}");
+                        s.update = UpdateStatus::Failed("Couldn't check for updates.".into());
+                        if asked {
+                            cx.emit(StateEvent::UpdateResult);
+                        }
+                    }
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    /// Installs the available update, or opens the release page where this
+    /// copy can't update itself.
+    pub fn install_update(&mut self, cx: &mut Context<Self>) {
+        let release = match &self.update {
+            UpdateStatus::Available(r) | UpdateStatus::InstallFailed(r, _) => r.clone(),
+            _ => return,
+        };
+        if !update::can_install() {
+            self.send(Command::OpenUrl(update::RELEASE_PAGE.into()));
+            return;
+        }
+        self.update = UpdateStatus::Installing(release.clone());
+        cx.notify();
+        cx.spawn(async move |this, cx| {
+            // The installer's blocking HTTP client needs a thread of its own.
+            let (tx, rx) = async_channel::bounded(1);
+            std::thread::spawn(move || {
+                let _ = tx.send_blocking(update::install());
+            });
+            let result = rx.recv().await.unwrap_or_else(|_| Err(anyhow::anyhow!("the installer stopped")));
+            let _ = this.update(cx, |s, cx| {
+                match result {
+                    Ok(()) => cx.emit(StateEvent::UpdateInstalled),
+                    Err(e) => {
+                        log::error!("installing Bars {} failed: {e:#}", release.version);
+                        let why = format!("Couldn't install ver. {}.", release.version);
+                        s.update = UpdateStatus::InstallFailed(release, why);
+                        cx.emit(StateEvent::UpdateResult);
+                    }
+                }
+                cx.notify();
+            });
+        })
+        .detach();
     }
 
     pub fn send(&self, cmd: Command) {

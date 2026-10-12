@@ -42,6 +42,14 @@ the model was unsure of that look or sound like what it wrote, never
 rewordings or everyday words; less clear ones wait under Suggestions on the
 Dictionary page until they're seen again. Only the word pairs are kept.
 
+Once a day Bars looks for a newer version: it fetches a small file
+(`latest.json`) from the latest GitHub release, and sends nothing else. It
+only tells you, with a notification and in the tray menu; nothing is
+installed until you choose Update (tray menu, settings, or `bars --update`).
+On macOS and Windows that downloads the new version, checks its signature,
+installs it and restarts Bars; on Linux it opens the release page. The
+daily check can be turned off in the settings, under Updates.
+
 ## Speech models
 
 All models run locally on the CPU (int8 ONNX). Measured on an 11 s clip:
@@ -142,6 +150,17 @@ same identity, so macOS keeps Accessibility and Microphone access across
 updates. Without the secrets the app is signed ad hoc. Opening without any
 prompt needs an Apple Developer ID with notarization.
 
+In-app updates read `latest.json` from the latest published release (a
+draft is never "latest", so publishing the release is what offers it).
+`scripts/update-manifest.py` writes it from the macOS `.app.tar.gz` and the
+Windows installer, each signed with the updater key (secrets
+`UPDATER_PRIVATE_KEY` and `UPDATER_PRIVATE_KEY_PASSWORD`). The key is made
+once with `cargo packager signer generate`; its public half goes in
+`PUBLIC_KEY` in `crates/bars-core/src/update.rs`. Keep the private key safe:
+installed copies only accept updates signed with it. Without the secrets no
+`latest.json` is published; with an empty `PUBLIC_KEY`, Bars announces
+updates but only opens the release page.
+
 CI (Actions > CI > Run workflow) also builds Windows and macOS and runs
 `scripts/smoke`: the app is started on a real runner, driven through its
 command line, and screenshots plus logs are uploaded.
@@ -156,6 +175,7 @@ crates/bars-core   engine, audio, hotkeys, text injection, config, history
   src/audio.rs        cpal capture (PulseAudio/PipeWire), resampling, cues
   src/text.rs         filler removal, dictionary, snippets, voice commands
   src/learn.rs        learning dictionary words from corrections (tested)
+  src/update.rs       update checks (GitHub Releases), installs on request
   src/platform/       OS backends: linux/ (evdev, uinput, portals, data-control
                       clipboard, AT-SPI), win/ (keyboard hook, clipboard, UI
                       Automation), mac/ (event tap, pasteboard, accessibility,

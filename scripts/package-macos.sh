@@ -31,6 +31,16 @@ codesign --force --sign "$identity" --timestamp=none "$app"
 codesign --verify --strict --verbose=2 "$app"
 codesign --display --requirements - "$app"
 
+# The in-app updater's download: the app as signed above, so an update
+# keeps the code signature (and with it Accessibility and Microphone
+# access), plus a signature with the updater key (CI secret). Made here
+# rather than by cargo-packager, whose archive is taken before codesign.
+if [ -n "${BARS_UPDATER_KEY:-}" ]; then
+  archive="dist/Bars_${version}_${arch}.app.tar.gz"
+  COPYFILE_DISABLE=1 tar -czf "$archive" -C "$(dirname "$app")" "$(basename "$app")"
+  cargo packager signer sign -k "$BARS_UPDATER_KEY" --password "${BARS_UPDATER_KEY_PASSWORD:-}" "$archive"
+fi
+
 if [ ! -x .dmgbuild/bin/dmgbuild ]; then
   python3 -m venv .dmgbuild
   .dmgbuild/bin/pip install --quiet 'dmgbuild>=1.6,<2'

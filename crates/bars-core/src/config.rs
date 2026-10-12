@@ -260,6 +260,8 @@ pub struct UiConfig {
     pub theme: ThemeMode,
     pub launch_at_login: bool,
     pub save_history: bool,
+    /// Look for a newer Bars once a day (see `update`).
+    pub check_updates: bool,
 }
 
 impl Default for UiConfig {
@@ -269,6 +271,7 @@ impl Default for UiConfig {
             theme: ThemeMode::System,
             launch_at_login: true,
             save_history: true,
+            check_updates: true,
         }
     }
 }

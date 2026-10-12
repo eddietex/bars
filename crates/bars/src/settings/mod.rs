@@ -15,9 +15,9 @@ use gpui_kit::*;
 use bars_core::controller::Phase;
 use bars_core::engine::EngineStatus;
 
-use crate::state::AppState;
+use crate::state::{AppState, UpdateStatus};
 use crate::theme::{FONT, PaletteExt};
-use crate::widgets::{h_row, icon, v_col};
+use crate::widgets::{ButtonKind, button, h_row, icon, v_col};
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub enum Page {
@@ -132,6 +132,7 @@ impl SettingsView {
         let st = self.state.read(cx);
         let needs_setup = !st.setup_complete();
         let status = status_line(st);
+        let update = st.update.offered().map(|r| (r.version.clone(), st.update.clone()));
         let pages = [Page::Home, Page::General, Page::Model, Page::Dictionary, Page::History];
         let item = |page: Page, attention: bool, cx: &mut Context<Self>| {
             let active = self.page == page;
@@ -176,6 +177,7 @@ impl SettingsView {
                     .children(pages.into_iter().map(|page| item(page, false, cx).into_any_element())),
             )
             .child(div().flex_1())
+            .when_some(update, |el, (version, status)| el.child(self.update_banner(version, status, cx)))
             .child(item(Page::Setup, needs_setup, cx))
             .child(
                 h_row()
@@ -195,6 +197,46 @@ impl SettingsView {
                             .text_color(p.text_faint)
                             .child(concat!("v", env!("CARGO_PKG_VERSION"))),
                     ),
+            )
+    }
+}
+
+impl SettingsView {
+    /// Above Setup while a newer Bars is on offer: what it is, and a button
+    /// to update (or download, where Bars can't install it itself).
+    fn update_banner(&self, version: String, status: UpdateStatus, cx: &mut Context<Self>) -> impl IntoElement {
+        let p = cx.palette();
+        let (detail, action) = match status {
+            UpdateStatus::Installing(_) => (format!("Installing ver. {version}…"), None),
+            UpdateStatus::InstallFailed(..) => ("Couldn't install".to_string(), Some("Try again")),
+            _ => (format!("ver. {version}"), Some(crate::shell::update_action())),
+        };
+        let state = self.state.clone();
+        v_col()
+            .mb(px(8.))
+            .px(px(12.))
+            .py(px(10.))
+            .gap(px(8.))
+            .rounded(px(10.))
+            .bg(p.accent_soft)
+            .child(
+                h_row()
+                    .gap(px(8.))
+                    .text_size(px(13.))
+                    .font_weight(FontWeight::MEDIUM)
+                    .text_color(p.text)
+                    .child(icon(I::Sparkles, p.accent_text, 15.))
+                    .child("New version available"),
+            )
+            .child(
+                h_row()
+                    .gap(px(8.))
+                    .child(div().flex_1().text_size(px(12.)).text_color(p.text_muted).child(detail))
+                    .when_some(action, |el, label| {
+                        el.child(button("sidebar-update", label, ButtonKind::Primary, p).h(px(26.)).on_click(
+                            move |_, _, cx| state.update(cx, |s, cx| s.install_update(cx)),
+                        ))
+                    }),
             )
     }
 }

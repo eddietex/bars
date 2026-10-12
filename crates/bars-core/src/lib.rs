@@ -8,6 +8,7 @@ pub mod learn;
 pub mod models;
 pub mod paths;
 pub mod text;
+pub mod update;
 pub mod controller;
 pub mod history;
 pub mod platform;
