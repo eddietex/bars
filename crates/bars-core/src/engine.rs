@@ -276,7 +276,25 @@ impl Worker {
             },
             _ => options,
         };
-        let result = loaded.model.speech().transcribe(samples, &options).map_err(|e| anyhow!("{e}"))?;
+        let mut result = loaded.model.speech().transcribe(samples, &options).map_err(|e| anyhow!("{e}"))?;
+        // Parakeet can hear nothing at all in a short phrase with little
+        // silence around it ("store yesterday" in 1.5 s), which it gets with
+        // about a second of silence on both sides and a louder signal. Only
+        // an empty result is retried, so nothing it already hears changes.
+        if result.text.trim().is_empty() {
+            let peak = samples.iter().fold(0.0f32, |m, s| m.max(s.abs()));
+            let gain = (0.5 / peak.max(1e-6)).min(10.0);
+            let louder: Vec<f32> = samples.iter().map(|s| s * gain).collect();
+            let roomier = TranscribeOptions {
+                leading_silence_ms: Some(1250),
+                trailing_silence_ms: Some(1200),
+                ..options
+            };
+            result = loaded.model.speech().transcribe(&louder, &roomier).map_err(|e| anyhow!("{e}"))?;
+            if !result.text.trim().is_empty() {
+                log::info!("heard nothing at first; heard it with more silence around it");
+            }
+        }
         Ok((result.text.trim().to_string(), started.elapsed().as_millis() as u64))
     }
 }
