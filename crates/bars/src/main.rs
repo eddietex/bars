@@ -65,7 +65,8 @@ impl AssetSource for Assets {
     }
 }
 
-const USAGE: &str = "Usage: bars [--background | --toggle | --cancel | --paste-last | --settings | --quit | --doctor]";
+const USAGE: &str =
+    "Usage: bars [--background | --toggle | --cancel | --paste-last | --settings | --quit | --doctor | --version]";
 
 #[cfg(target_os = "windows")]
 fn single_instance_windows() -> bool {
@@ -102,6 +103,10 @@ fn main() {
         Some("--quit") => Some("Quit"),
         Some("-h" | "--help") => {
             println!("{USAGE}");
+            return;
+        }
+        Some("-V" | "--version") => {
+            println!("Bars {}", env!("CARGO_PKG_VERSION"));
             return;
         }
         Some("--doctor") => {

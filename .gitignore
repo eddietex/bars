@@ -6,3 +6,6 @@
 /dist
 /packaging/macos/dmg-background.tiff
 /.dmgbuild
+
+# Reference binaries for research (not ours to commit)
+/.ref

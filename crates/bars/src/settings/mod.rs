@@ -185,7 +185,13 @@ impl SettingsView {
                         Status::Warn => p.warning,
                         Status::Live => p.recording,
                     }))
-                    .child(div().text_size(px(12.)).text_color(p.text_muted).child(status.0)),
+                    .child(div().flex_1().text_size(px(12.)).text_color(p.text_muted).child(status.0))
+                    .child(
+                        div()
+                            .text_size(px(11.5))
+                            .text_color(p.text_faint)
+                            .child(concat!("v", env!("CARGO_PKG_VERSION"))),
+                    ),
             )
     }
 }
