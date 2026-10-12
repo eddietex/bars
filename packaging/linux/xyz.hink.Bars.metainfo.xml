@@ -36,9 +36,15 @@
     <internet>first-run</internet>
   </requires>
   <releases>
-    <release version="0.2.2" date="2026-10-12">
+    <release version="0.3.0" date="2026-10-12">
       <description>
         <ul>
+          <li>Dictations fit into the text around the cursor: a space only where one is needed, lowercase when continuing a sentence, and no full stop when the sentence carries on (in apps with accessibility support).</li>
+          <li>When no text box has focus, Bars says so and offers the text to copy.</li>
+          <li>Pasted text stays out of clipboard-history apps, and everything you had copied (images and files too) comes back afterwards.</li>
+          <li>Long text pasted into Claude Code or Codex goes in pieces, so it shows as text instead of "[Pasted text]".</li>
+          <li>Escape cancels a hands-free dictation without also reaching the app.</li>
+          <li>A key release Bars missed no longer blocks the shortcut.</li>
           <li>Model downloads trust the system's certificates, so they work behind company proxies and antivirus that inspect HTTPS.</li>
           <li>macOS: changing the shortcut works again; the shortcut keeps working after macOS asks for a password, and with Caps Lock on.</li>
           <li>The version is shown in the settings sidebar and by bars --version.</li>
