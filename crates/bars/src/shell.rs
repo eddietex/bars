@@ -56,12 +56,24 @@ pub struct Shell {
     overlay_close: Option<Task<()>>,
     overlay_open: Option<Task<()>>,
     tray: Option<crate::tray::TrayHandle>,
+    /// macOS: the Dock icon is showing (while settings or setup is open).
+    in_dock: bool,
     _subs: Vec<Subscription>,
 }
 
 impl Shell {
     pub fn new(state: Entity<AppState>, commands: async_channel::Receiver<ShellCommand>, tray_tx: async_channel::Sender<ShellCommand>, cx: &mut Context<Self>) -> Self {
-        let subs = vec![cx.subscribe(&state, |this, _, ev: &StateEvent, cx| this.on_state(ev, cx))];
+        let weak = cx.weak_entity();
+        let subs = vec![
+            cx.subscribe(&state, |this, _, ev: &StateEvent, cx| this.on_state(ev, cx)),
+            // The window may close in the middle of updating the shell.
+            cx.on_window_closed(move |cx, _| {
+                let weak = weak.clone();
+                cx.defer(move |cx| {
+                    let _ = weak.update(cx, |this, cx| this.sync_dock(cx));
+                });
+            }),
+        ];
 
         // Route tray / D-Bus commands into the app.
         cx.spawn(async move |this, cx| {
@@ -91,6 +103,7 @@ impl Shell {
             overlay_close: None,
             overlay_open: None,
             tray,
+            in_dock: false,
             _subs: subs,
         }
     }
@@ -207,6 +220,30 @@ impl Shell {
             Ok(h) => self.onboarding = Some(h),
             Err(e) => log::error!("could not open setup assistant: {e:#}"),
         }
+        self.sync_dock(cx);
+    }
+
+    /// macOS: Bars stays out of the Dock (it lives in the menu bar), except
+    /// while the settings or setup window is open, so it can be switched
+    /// back to like any app. Elsewhere those windows already get a taskbar
+    /// button and the recording pill never does.
+    fn sync_dock(&mut self, cx: &mut Context<Self>) {
+        let alive = |h: Option<WindowHandle<gpui_kit::base::Root>>, cx: &mut Context<Self>| {
+            h.is_some_and(|h| h.update(cx, |_, _, _| ()).is_ok())
+        };
+        let want = alive(self.settings, cx) || alive(self.onboarding, cx);
+        if want == self.in_dock {
+            return;
+        }
+        self.in_dock = want;
+        #[cfg(target_os = "macos")]
+        if want {
+            cx.set_activation_policy(ActivationPolicy::Regular);
+            // Without this the menu bar may not appear until reactivation.
+            cx.activate(true);
+        } else {
+            cx.set_activation_policy(ActivationPolicy::Accessory);
+        }
     }
 
     fn first_unfinished_step(&self, cx: &App) -> Step {
@@ -302,6 +339,7 @@ impl Shell {
             Ok(h) => self.settings = Some(h),
             Err(e) => log::error!("could not open settings: {e:#}"),
         }
+        self.sync_dock(cx);
     }
 
     fn on_command(&mut self, cmd: ShellCommand, cx: &mut Context<Self>) {
