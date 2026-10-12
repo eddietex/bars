@@ -707,12 +707,15 @@ fn spawn_inserter(ui: EventSender, hotkeys: &Hotkeys) -> Sender<InsertJob> {
                             // fingers a moment to leave the modifiers.
                             None => thread::sleep(Duration::from_millis(150)),
                         }
-                        if let Err(e) = injector.insert(&text, &cfg) {
-                            log::warn!("insert failed: {e:#}");
-                            let _ = ui.try_send(Event::Notice {
-                                kind: NoticeKind::Warning,
-                                text: format!("{e:#}"),
-                            });
+                        match injector.insert(&text, &cfg) {
+                            Ok(()) => log::info!("inserted {} characters ({:?})", text.chars().count(), cfg.method),
+                            Err(e) => {
+                                log::warn!("insert failed: {e:#}");
+                                let _ = ui.try_send(Event::Notice {
+                                    kind: NoticeKind::Warning,
+                                    text: format!("{e:#}"),
+                                });
+                            }
                         }
                     }
                     InsertJob::RememberTarget => injector.remember_target(),

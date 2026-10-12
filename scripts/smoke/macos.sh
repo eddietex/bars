@@ -1,11 +1,17 @@
 #!/usr/bin/env bash
 # Smoke test on a macOS runner: runs the debug build and checks the CLI,
-# single instance, windows and overlay. Screenshots and logs land in smoke/
-# (uploaded as a CI artifact). Typing needs Accessibility, which a runner
-# can't grant, so pasting is only tested on Windows.
+# single instance, windows, overlay and pasting into TextEdit (the runner
+# grants Accessibility). Screenshots and logs land in smoke/ (uploaded as a
+# CI artifact).
 set -euo pipefail
 exe=target/debug/bars
 mkdir -p smoke
+
+# One history entry for the paste test.
+data="$HOME/Library/Application Support/bars"
+mkdir -p "$data"
+printf '{"id":1,"at":"%s","text":"Hello from the Bars smoke test","model":"test","audio_secs":1.0,"infer_ms":1,"words":6}\n' \
+  "$(date -u +%Y-%m-%dT%H:%M:%S+00:00)" > "$data/history.jsonl"
 
 echo "== doctor"
 "$exe" --doctor | tee smoke/doctor.txt
@@ -35,6 +41,18 @@ sleep 2
 screencapture -x smoke/3-overlay.png || true
 "$exe" --cancel
 sleep 1
+
+echo "== paste into another app"
+# A blank TextEdit document instead of the open panel.
+defaults write com.apple.TextEdit NSShowAppCentricOpenPanelInsteadOfUntitledFile -bool false
+open -a TextEdit
+sleep 5
+"$exe" --paste-last
+sleep 3
+screencapture -x smoke/4-pasted.png || true
+kill -0 "$app" 2>/dev/null || { echo "bars crashed while pasting"; cat smoke/bars.log; exit 1; }
+grep -Eq "inserted [0-9]+ characters" smoke/bars.log || { echo "paste-last inserted nothing"; cat smoke/bars.log; exit 1; }
+osascript -e 'tell application "TextEdit" to quit saving no' >/dev/null 2>&1 || true
 
 echo "== quit"
 "$exe" --quit

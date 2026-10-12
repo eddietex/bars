@@ -8,10 +8,8 @@ pub enum ReqId {
     Microphone,
     /// Linux: read keyboards + create a virtual keyboard (udev rule).
     KeyboardAccess,
-    /// macOS: Accessibility (posting key events to type/paste).
+    /// macOS: Accessibility (observing the shortcut and typing/pasting).
     Accessibility,
-    /// macOS: Input Monitoring (observing the global shortcut).
-    InputMonitoring,
 }
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
@@ -156,40 +154,31 @@ fn linux_keyboard(ctx: &Context) -> Requirement {
     }
 }
 
+/// System Settings › Privacy & Security › Accessibility.
+#[cfg(target_os = "macos")]
+pub const MAC_ACCESSIBILITY_SETTINGS: &str =
+    "x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility";
+
 #[cfg(target_os = "macos")]
 fn macos() -> Vec<Requirement> {
     use super::mac::permissions;
-    let status = |ok: bool| if ok { ReqStatus::Granted } else { ReqStatus::Missing };
-    vec![
-        Requirement {
-            id: ReqId::InputMonitoring,
-            title: "Input Monitoring".into(),
-            why: "Lets Bars notice your dictation shortcut while other apps are focused. Bars watches only for the shortcut.".into(),
-            status: status(permissions::can_listen()),
-            granted_note: Some("Bars can see your shortcut in every app".into()),
-            actions: vec![
-                FixAction::Elevate,
-                FixAction::OpenSettings {
-                    label: "Open Input Monitoring settings".into(),
-                    url: "x-apple.systempreferences:com.apple.preference.security?Privacy_ListenEvent".into(),
-                },
-            ],
-        },
-        Requirement {
-            id: ReqId::Accessibility,
-            title: "Accessibility".into(),
-            why: "Lets Bars paste or type your words into the app you're using.".into(),
-            status: status(permissions::can_post()),
-            granted_note: Some("Bars can type into other apps".into()),
-            actions: vec![
-                FixAction::Elevate,
-                FixAction::OpenSettings {
-                    label: "Open Accessibility settings".into(),
-                    url: "x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility".into(),
-                },
-            ],
-        },
-    ]
+    vec![Requirement {
+        id: ReqId::Accessibility,
+        title: "Accessibility".into(),
+        why: "Lets Bars notice your shortcut in every app and type your words into the one you're using. \
+              Turn on Bars in the list that opens. If it's already on but this still says it's needed \
+              (common after an update), select Bars, remove it with −, then allow access again."
+            .into(),
+        status: if permissions::accessibility() { ReqStatus::Granted } else { ReqStatus::Missing },
+        granted_note: Some("Bars can see your shortcut and type into other apps".into()),
+        actions: vec![
+            FixAction::Elevate,
+            FixAction::OpenSettings {
+                label: "Open Accessibility settings".into(),
+                url: MAC_ACCESSIBILITY_SETTINGS.into(),
+            },
+        ],
+    }]
 }
 
 /// Opens a settings URL with the platform's handler.

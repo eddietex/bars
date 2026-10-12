@@ -10,6 +10,20 @@ use enigo::{Direction, Enigo, Key, Keyboard, Settings};
 
 use crate::config::{InsertMethod, InsertionConfig};
 
+/// Runs keyboard simulation where the platform allows it: macOS aborts the
+/// app when keyboard layouts (needed to find the key for "v", or to type)
+/// are looked up off the main thread; elsewhere any thread works.
+fn on_input_thread<R>(f: impl FnOnce() -> R) -> R {
+    #[cfg(target_os = "macos")]
+    {
+        super::mac::main_thread::run(f)
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        f()
+    }
+}
+
 #[cfg(target_os = "macos")]
 const PASTE_MODIFIER: Key = Key::Meta;
 #[cfg(not(target_os = "macos"))]
@@ -30,7 +44,7 @@ impl NativeInjector {
             open_prompt_to_get_permissions: false,
             ..Settings::default()
         };
-        let (enigo, error) = match Enigo::new(&settings) {
+        let (enigo, error) = match on_input_thread(|| Enigo::new(&settings)) {
             Ok(e) => (Some(e), None),
             Err(e) => {
                 log::warn!("keyboard simulation unavailable: {e}");
@@ -98,7 +112,7 @@ impl NativeInjector {
             );
         };
         match cfg.method {
-            InsertMethod::Type => type_text(enigo, text),
+            InsertMethod::Type => on_input_thread(|| type_text(enigo, text)),
             InsertMethod::Auto | InsertMethod::Paste => paste_text(enigo, text, cfg),
         }
     }
@@ -120,10 +134,12 @@ fn paste_text(enigo: &mut Enigo, text: &str, cfg: &InsertionConfig) -> anyhow::R
     clipboard.set_text(text.to_string())?;
     thread::sleep(Duration::from_millis(30));
 
-    enigo.key(PASTE_MODIFIER, Direction::Press).map_err(key_err)?;
-    let tapped = enigo.key(Key::Unicode('v'), Direction::Click).map_err(key_err);
-    enigo.key(PASTE_MODIFIER, Direction::Release).map_err(key_err)?;
-    tapped?;
+    on_input_thread(|| {
+        enigo.key(PASTE_MODIFIER, Direction::Press).map_err(key_err)?;
+        let tapped = enigo.key(Key::Unicode('v'), Direction::Click).map_err(key_err);
+        enigo.key(PASTE_MODIFIER, Direction::Release).map_err(key_err)?;
+        tapped
+    })?;
 
     if let Some(previous) = saved {
         let ours = text.to_string();

@@ -66,8 +66,8 @@ pub fn check_permissions(ctx: &requirements::Context) -> Permissions {
     #[cfg(target_os = "macos")]
     {
         Permissions {
-            hotkeys: mac::permissions::can_listen(),
-            keyboard: mac::permissions::can_post(),
+            hotkeys: mac::permissions::accessibility() || mac::permissions::input_monitoring(),
+            keyboard: mac::permissions::accessibility(),
             clipboard: true,
             sandboxed: false,
             fix_command: None,
@@ -113,11 +113,11 @@ pub fn fix_permissions(only: Option<requirements::ReqId>) -> anyhow::Result<()> 
         if want(ReqId::Microphone) {
             mac::permissions::request_microphone();
         }
-        if want(ReqId::InputMonitoring) {
-            mac::permissions::request_listen();
-        }
-        if want(ReqId::Accessibility) {
-            mac::permissions::request_post();
+        if want(ReqId::Accessibility) && !mac::permissions::accessibility() {
+            // Lists Bars in Accessibility (and prompts, the first time
+            // only), then opens that list so there's always a next step.
+            mac::permissions::request_accessibility();
+            requirements::open_url(requirements::MAC_ACCESSIBILITY_SETTINGS)?;
         }
         Ok(())
     }

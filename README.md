@@ -118,8 +118,8 @@ git tag v0.1.0 && git push origin v0.1.0
 ```
 
 Windows and macOS builds are unsigned for now, so SmartScreen and Gatekeeper
-warn on first launch, and macOS may ask for Input Monitoring and
-Accessibility again after an update. Signing needs a code-signing
+warn on first launch, and after an update macOS may need Bars removed from
+and re-added to the Accessibility list. Signing needs a code-signing
 certificate (Windows) and a Developer ID with notarization (macOS).
 
 CI (Actions > CI > Run workflow) also builds Windows and macOS and runs
@@ -149,8 +149,13 @@ scripts/smoke/      Windows/macOS runtime smoke tests run by CI
 The shortcut, insertion, overlay, tray, autostart and permission backends
 are implemented on all three platforms. What the setup assistant asks for
 lives in `platform/requirements.rs`: keyboard access on Linux (udev rule),
-microphone privacy on Windows, and Microphone, Input Monitoring and
-Accessibility on macOS.
+microphone privacy on Windows, and Microphone and Accessibility on macOS
+(Accessibility covers both noticing the shortcut and typing). macOS
+keyboard simulation runs on the main thread: layout lookups abort the app
+anywhere else.
+
+`scripts/package-macos.sh` builds the DMG: cargo-packager makes Bars.app,
+dmgbuild the disk image with its background and icon layout.
 
 Dev helpers: `BARS_ONBOARDING=<welcome|microphone|access|model|try|done>`
 opens the assistant at a step; `BARS_DEV_NO_ACCESS=1` previews it as a user

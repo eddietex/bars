@@ -59,6 +59,11 @@ jobs:
       - run: cargo build -p bars --locked
       - name: Smoke test
         run: ${{ matrix.name == 'Windows' && 'pwsh scripts/smoke/windows.ps1' || 'bash scripts/smoke/macos.sh' }}
+      - name: Disk image (macOS)
+        if: matrix.name == 'macOS'
+        run: |
+          cargo install cargo-packager --locked --version 0.11.8
+          bash scripts/smoke/macos-dmg.sh
       - uses: actions/upload-artifact@v4
         if: always()
         with:

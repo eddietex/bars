@@ -34,8 +34,10 @@ pub struct MacHotkeys {
 
 impl MacHotkeys {
     pub fn spawn(chord: Chord, events: Sender<HotkeyEvent>) -> anyhow::Result<Self> {
-        if !super::permissions::can_listen() {
-            anyhow::bail!("Input Monitoring permission is needed");
+        // Checked first: creating a tap without access pops a system prompt
+        // before the setup assistant has explained anything.
+        if !super::permissions::accessibility() && !super::permissions::input_monitoring() {
+            anyhow::bail!("Accessibility permission is needed");
         }
         let shared = Arc::new(Mutex::new(Shared {
             chord: Some(chord),

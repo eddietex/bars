@@ -5,3 +5,4 @@
 *.flatpak
 /dist
 /packaging/macos/dmg-background.tiff
+/.dmgbuild
