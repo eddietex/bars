@@ -47,6 +47,10 @@
           <li>A key release Bars missed no longer blocks the shortcut.</li>
           <li>With a Parakeet model, Bars learns from your corrections: fix a word it got wrong and it's added to your dictionary, with Undo. Less clear fixes wait under Suggestions.</li>
           <li>Dictations can be corrected on the History page.</li>
+          <li>Bars looks for a new version once a day and tells you; it's installed only when you choose Update (on Linux the release page opens). The check can be turned off.</li>
+          <li>Parakeet hears short phrases it used to return nothing for.</li>
+          <li>macOS: the text around the cursor is also read in rich text editors on web pages.</li>
+          <li>macOS: the app icon has the same shape as other Mac apps.</li>
           <li>macOS: the app is signed, so a downloaded copy no longer reports itself as damaged, and permissions are kept across updates.</li>
           <li>macOS: Bars shows in the Dock while its settings are open.</li>
           <li>Model downloads trust the system's certificates, so they work behind company proxies and antivirus that inspect HTTPS.</li>
