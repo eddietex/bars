@@ -32,7 +32,9 @@ finish-args:
   # a command to paste instead. Drop this for Flathub.
   - --talk-name=org.freedesktop.Flatpak
 build-options:
-  append-path: /usr/lib/sdk/rust-stable/bin
+  # llvm22's clang tells bindgen where its own headers are; appended, so
+  # the compilers stay the SDK's.
+  append-path: /usr/lib/sdk/rust-stable/bin:/usr/lib/sdk/llvm22/bin
   prepend-ld-library-path: /usr/lib/sdk/llvm22/lib
   env:
     CARGO_HOME: /run/build/bars/cargo
