@@ -9,6 +9,8 @@ runtime-version: '26.08'
 sdk: org.freedesktop.Sdk
 sdk-extensions:
   - org.freedesktop.Sdk.Extension.rust-stable
+  # libclang, which generates llama.cpp's Rust bindings (polish).
+  - org.freedesktop.Sdk.Extension.llvm22
 command: bars
 finish-args:
   # Display: GPUI renders with Vulkan on Wayland (X11 as fallback).
@@ -31,9 +33,11 @@ finish-args:
   - --talk-name=org.freedesktop.Flatpak
 build-options:
   append-path: /usr/lib/sdk/rust-stable/bin
+  prepend-ld-library-path: /usr/lib/sdk/llvm22/lib
   env:
     CARGO_HOME: /run/build/bars/cargo
     CARGO_TERM_COLOR: never
+    LIBCLANG_PATH: /usr/lib/sdk/llvm22/lib
   build-args:
     - --share=network
 modules:

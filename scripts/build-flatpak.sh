@@ -1,8 +1,9 @@
 #!/bin/sh
 # Builds and installs the Bars Flatpak for the current user.
-# Requires org.flatpak.Builder and the rust-stable SDK extension:
+# Requires org.flatpak.Builder and the rust-stable and llvm22 SDK extensions:
 #   flatpak install --user flathub org.flatpak.Builder \
-#       org.freedesktop.Sdk//26.08 org.freedesktop.Sdk.Extension.rust-stable//26.08
+#       org.freedesktop.Sdk//26.08 org.freedesktop.Sdk.Extension.rust-stable//26.08 \
+#       org.freedesktop.Sdk.Extension.llvm22//26.08
 set -eu
 cd "$(dirname "$(readlink -f "$0")")/.."
 if command -v flatpak-builder >/dev/null 2>&1; then

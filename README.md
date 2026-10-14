@@ -144,7 +144,7 @@ cargo run -p bars-core --example headless   # controller without UI
 ### Flatpak (recommended distribution)
 
 ```sh
-flatpak install --user flathub org.flatpak.Builder org.freedesktop.Sdk.Extension.rust-stable//26.08
+flatpak install --user flathub org.flatpak.Builder org.freedesktop.Sdk.Extension.rust-stable//26.08 org.freedesktop.Sdk.Extension.llvm22//26.08
 ./scripts/build-flatpak.sh               # builds + installs for the current user
 BUNDLE=1 ./scripts/build-flatpak.sh      # also writes bars.flatpak
 flatpak run xyz.hink.Bars
