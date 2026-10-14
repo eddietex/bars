@@ -9,7 +9,7 @@ mod setup;
 
 use gpui_kit::assets::IconName as I;
 use gpui_kit::component::input::{InputState, TextareaState};
-use gpui_kit::component::TitleBar;
+use gpui_kit::component::{TITLE_BAR_HEIGHT, TitleBar};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 use bars_core::controller::Phase;
@@ -163,6 +163,8 @@ impl SettingsView {
             .border_r_1()
             .border_color(p.border)
             .px(px(12.))
+            // Under the title bar (the window's controls), which overlays it.
+            .pt(TITLE_BAR_HEIGHT)
             .pb(px(14.))
             .child(
                 h_row()
@@ -282,37 +284,47 @@ impl Render for SettingsView {
             Page::History => self.render_history(window, cx).into_any_element(),
             Page::Setup => self.render_setup(window, cx).into_any_element(),
         };
-        v_col()
+        // Full bleed: the sidebar and the page reach the top of the window,
+        // and the title bar lies over them, transparent, for dragging and
+        // the window controls.
+        div()
             .size_full()
+            .relative()
             .bg(p.bg)
             .font_family(FONT)
             .text_color(p.text)
-            .child(TitleBar::new().bg(p.sidebar).border_color(p.border))
             .child(
                 h_row()
-                    .flex_1()
-                    .min_h_0()
-                    .w_full()
+                    .size_full()
                     .items_start()
                     .child(self.render_sidebar(cx))
                     .child(
-                        div()
-                            .id("page-scroll")
-                            .flex_1()
-                            .min_w_0()
-                            .h_full()
-                            .overflow_y_scroll()
-                            .child(
-                                div()
-                                    .w_full()
-                                    .max_w(px(780.))
-                                    .mx_auto()
-                                    .px(px(40.))
-                                    .pt(px(28.))
-                                    .pb(px(48.))
-                                    .child(page),
-                            ),
+                        // The page scrolls below the title bar's strip.
+                        div().flex_1().min_w_0().h_full().pt(TITLE_BAR_HEIGHT).child(
+                            div()
+                                .id("page-scroll")
+                                .size_full()
+                                .overflow_y_scroll()
+                                .child(
+                                    div()
+                                        .w_full()
+                                        .max_w(px(780.))
+                                        .mx_auto()
+                                        .px(px(40.))
+                                        .pt(px(28.))
+                                        .pb(px(48.))
+                                        .child(page),
+                                ),
+                        ),
                     ),
+            )
+            .child(
+                div().absolute().top_0().left_0().w_full().child(
+                    TitleBar::new()
+                        .w_full()
+                        .bg(transparent_black())
+                        .border_color(transparent_black()),
+                ),
             )
     }
 }
