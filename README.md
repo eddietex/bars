@@ -84,7 +84,9 @@ M4 Pro a typical dictation takes about 45 ms and a 90-word email about
 190 ms, two to two and a half times that on two cores. Most of a clean-up
 copies the dictation, so Bars guesses the next tokens from it and has the
 model check them all in one pass, which halves the time without changing
-the result. Metal isn't used: it isn't faster for a model this small, and
+the result. The app's name and the text around the cursor are read into
+the model while you're still talking, which saves about 20 ms when there's
+text before the cursor, again without changing the result. Metal isn't used: it isn't faster for a model this small, and
 it compiles its shaders for 15 seconds the first time each new version
 starts. On x86-64 polish needs AVX2 (Intel since 2013, AMD since 2015).
 Dictations that look like another language are left alone.

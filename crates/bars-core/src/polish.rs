@@ -12,6 +12,7 @@
 //! from the field, that lives in memory for one dictation and is never
 //! logged.
 
+use std::collections::VecDeque;
 use std::num::NonZeroU32;
 use std::path::Path;
 use std::sync::OnceLock;
@@ -39,6 +40,10 @@ const FOCUS_TIMEOUT: Duration = Duration::from_millis(400);
 const CONTEXT_CHARS: usize = 200;
 /// Tokens guessed ahead from the dictation itself (see `complete`).
 const DRAFT: usize = 8;
+/// Room in a context read ahead (see `Model::prepare`): the text around
+/// the cursor, a dictation of up to about 200 words and its rewrite.
+/// Longer ones get a context of their own.
+const AHEAD_CTX: u32 = 1024;
 
 /// The processor can run llama.cpp's CPU code, which on x86-64 is built for
 /// AVX2 (see .cargo/config.toml).
@@ -189,6 +194,12 @@ const NUMBERS: &[&str] = &[
 /// fixed order (app, site, tone, before, after, text), then `out:`. With
 /// no tone the model follows the text before the cursor.
 fn prompt(text: &str, app: Option<&str>, field: Option<&Surroundings>) -> String {
+    format!("{}text: {}\nout:", context_lines(app, field), text.trim())
+}
+
+/// The prompt's lines before the dictation, about where it goes. They're
+/// known when recording starts, so they're read ahead (`Model::prepare`).
+fn context_lines(app: Option<&str>, field: Option<&Surroundings>) -> String {
     let mut p = String::new();
     if let Some(app) = app {
         p.push_str(&format!("app: {app}\n"));
@@ -206,7 +217,6 @@ fn prompt(text: &str, app: Option<&str>, field: Option<&Surroundings>) -> String
             p.push_str(&format!("after: {after}\n"));
         }
     }
-    p.push_str(&format!("text: {}\nout:", text.trim()));
     p
 }
 
@@ -285,10 +295,15 @@ pub struct Job {
     pub polish: bool,
     /// The field, being read since the dictation started.
     pub focus: Option<Receiver<Focus>>,
+    /// The field went to `Polisher::prepare` under this request's id
+    /// instead; it comes back with the result.
+    pub prepared: bool,
 }
 
 enum Cmd {
     Configure { on: bool, idle_unload: Option<Duration> },
+    Prepare { id: u64, focus: Receiver<Focus> },
+    Forget(u64),
     Polish(Job),
     /// The model was downloaded or deleted.
     Recheck,
@@ -317,6 +332,19 @@ impl Polisher {
         let _ = self.tx.send(Cmd::Configure { on, idle_unload });
     }
 
+    /// A dictation started: read where it goes (the field being read)
+    /// into the model while the user talks, so polishing it afterwards
+    /// only reads the dictation. Its `Job` comes with `prepared` set, or
+    /// `forget` if there's none.
+    pub fn prepare(&self, id: u64, focus: Receiver<Focus>) {
+        let _ = self.tx.send(Cmd::Prepare { id, focus });
+    }
+
+    /// The dictation `prepare`d under `id` was cancelled.
+    pub fn forget(&self, id: u64) {
+        let _ = self.tx.send(Cmd::Forget(id));
+    }
+
     pub fn polish(&self, job: Job) {
         let _ = self.tx.send(Cmd::Polish(job));
     }
@@ -331,6 +359,10 @@ struct Worker {
     on: bool,
     idle_unload: Option<Duration>,
     model: Option<Model>,
+    /// The fields of dictations `prepare`d, by id, until their jobs come.
+    fields: VecDeque<(u64, Option<Focus>)>,
+    /// The dictation the model read ahead for.
+    read_ahead_for: Option<u64>,
     /// Loading failed; not retried until the model is downloaded again or
     /// polish is turned off and on.
     failed: bool,
@@ -339,7 +371,16 @@ struct Worker {
 
 impl Worker {
     fn new(events: Sender<PolishEvent>) -> Self {
-        Worker { events, on: false, idle_unload: None, model: None, failed: false, last_used: Instant::now() }
+        Worker {
+            events,
+            on: false,
+            idle_unload: None,
+            model: None,
+            fields: VecDeque::new(),
+            read_ahead_for: None,
+            failed: false,
+            last_used: Instant::now(),
+        }
     }
 
     fn status(&self, s: PolishStatus) {
@@ -376,11 +417,37 @@ impl Worker {
                     self.failed = false;
                     self.refresh();
                 }
+                Cmd::Prepare { id, focus } => {
+                    let focus = focus.recv_timeout(FOCUS_TIMEOUT).ok();
+                    self.read_ahead(id, focus.as_ref());
+                    self.fields.push_back((id, focus));
+                    // Fields of dictations that never came (none expected).
+                    while self.fields.len() > 8 {
+                        self.fields.pop_front();
+                    }
+                }
+                Cmd::Forget(id) => {
+                    self.fields.retain(|(i, _)| *i != id);
+                    if self.read_ahead_for == Some(id) {
+                        self.discard_read_ahead();
+                    }
+                }
                 Cmd::Polish(job) => {
-                    let focus = job.focus.and_then(|rx| rx.recv_timeout(FOCUS_TIMEOUT).ok());
+                    let focus = if job.prepared {
+                        // Dictations come in order: earlier ones were cancelled.
+                        self.fields.retain(|(i, _)| *i >= job.request);
+                        let i = self.fields.iter().position(|(i, _)| *i == job.request);
+                        i.and_then(|i| self.fields.remove(i)).and_then(|(_, f)| f)
+                    } else {
+                        job.focus.and_then(|rx| rx.recv_timeout(FOCUS_TIMEOUT).ok())
+                    };
                     let polished = job.polish.then(|| self.polish(&job.text, focus.as_ref())).flatten();
                     if job.polish {
                         self.last_used = Instant::now();
+                    }
+                    // Read ahead for this dictation, or an earlier one, and unused.
+                    if self.read_ahead_for.is_some_and(|id| id <= job.request) {
+                        self.discard_read_ahead();
                     }
                     let _ = self.events.send(PolishEvent::Done { request: job.request, polished, focus });
                 }
@@ -398,7 +465,30 @@ impl Worker {
         }
     }
 
-    fn ensure_loaded(&mut self) -> Option<&Model> {
+    /// Reads where dictation `id` goes into the model, if polish is on.
+    fn read_ahead(&mut self, id: u64, focus: Option<&Focus>) {
+        let (app, field) = target(focus);
+        let Some(model) = self.ensure_loaded() else { return };
+        let started = Instant::now();
+        match model.prepare(app.as_deref(), field) {
+            Ok(0) => {}
+            Ok(tokens) => {
+                log::debug!("polish: read {tokens} tokens ahead in {} ms", started.elapsed().as_millis());
+                self.read_ahead_for = Some(id);
+            }
+            Err(e) => log::warn!("polish: reading ahead failed: {e:#}"),
+        }
+        self.last_used = Instant::now();
+    }
+
+    fn discard_read_ahead(&mut self) {
+        self.read_ahead_for = None;
+        if let Some(model) = &mut self.model {
+            model.discard_read_ahead();
+        }
+    }
+
+    fn ensure_loaded(&mut self) -> Option<&mut Model> {
         if self.model.is_none() && self.on && !self.failed {
             if !supported() {
                 self.status(PolishStatus::Unsupported);
@@ -412,7 +502,7 @@ impl Worker {
             self.status(PolishStatus::Loading);
             let started = Instant::now();
             match Model::load(&info.dir().join(MODEL_FILE)) {
-                Ok(model) => {
+                Ok(mut model) => {
                     // The first run pays for setting up threads and buffers.
                     let _ = model.rewrite("Hello there.", None, None);
                     log::info!("loaded the polish model in {} ms", started.elapsed().as_millis());
@@ -428,25 +518,23 @@ impl Worker {
                 }
             }
         }
-        self.model.as_ref()
+        self.model.as_mut()
     }
 
     fn polish(&mut self, text: &str, focus: Option<&Focus>) -> Option<String> {
+        let (app, field) = target(focus);
         let model = self.ensure_loaded()?;
         let started = Instant::now();
-        // A terminal's cursor position can't be trusted: no surrounding text.
-        let field = focus.filter(|f| !f.in_terminal()).and_then(|f| f.field.as_ref());
-        let app = focus.and_then(app_name);
         match model.rewrite(text, app.as_deref(), field) {
-            Ok(Some(out)) if acceptable(text, &out) => {
-                log::info!("polished in {} ms", started.elapsed().as_millis());
+            Ok(Rewrite { text: Some(out), read_ahead }) if acceptable(text, &out) => {
+                log::info!("polished in {} ms ({read_ahead} tokens read ahead)", started.elapsed().as_millis());
                 Some(out)
             }
-            Ok(Some(_)) => {
+            Ok(Rewrite { text: Some(_), .. }) => {
                 log::info!("polish changed too much; using the dictation as heard");
                 None
             }
-            Ok(None) => {
+            Ok(Rewrite { text: None, .. }) => {
                 log::warn!("polish ran out of time or tokens after {} ms; using the dictation as heard", started.elapsed().as_millis());
                 None
             }
@@ -456,6 +544,13 @@ impl Worker {
             }
         }
     }
+}
+
+/// What the model is told about where a dictation goes. A terminal's
+/// cursor position can't be trusted: no surrounding text there.
+fn target(focus: Option<&Focus>) -> (Option<String>, Option<&Surroundings>) {
+    let field = focus.filter(|f| !f.in_terminal()).and_then(|f| f.field.as_ref());
+    (focus.and_then(app_name), field)
 }
 
 /// The model file, inside the model's directory.
@@ -496,30 +591,92 @@ unsafe extern "C" fn forward_log(
 /// The loaded model. The app polishes through [`Polisher`]; this is for
 /// tests and the `polish` example.
 pub struct Model {
+    /// A context that read the start of the next prompt (`prepare`). It
+    /// borrows `model`, so it's declared, and so dropped, before it.
+    ahead: Option<ReadAhead>,
     model: LlamaModel,
     threads: i32,
+}
+
+struct ReadAhead {
+    tokens: Vec<LlamaToken>,
+    /// Really borrows `Model::model` (see `Model::prepare`).
+    ctx: LlamaContext<'static>,
+}
+
+/// What the model wrote (None if it ran out of time or tokens), and how
+/// many tokens of its prompt it had read ahead.
+pub struct Rewrite {
+    pub text: Option<String>,
+    pub read_ahead: usize,
 }
 
 impl Model {
     pub fn load(path: &Path) -> anyhow::Result<Model> {
         let backend = backend()?;
         let model = LlamaModel::load_from_file(backend, path, &LlamaModelParams::default()).map_err(|e| anyhow!("{e}"))?;
-        Ok(Model { model, threads: threads() as i32 })
+        Ok(Model { ahead: None, model, threads: threads() as i32 })
+    }
+
+    /// Reads the lines of the next prompt that say where the dictation
+    /// goes (app, text around the cursor) while the user is still talking,
+    /// so `rewrite` then only reads the dictation. `rewrite` reads its
+    /// prompt in these same two steps either way, and uses this only when
+    /// its prompt starts with exactly these tokens, so the result is the
+    /// same to the bit. Returns how many tokens it read (none without app
+    /// or field).
+    pub fn prepare(&mut self, app: Option<&str>, field: Option<&Surroundings>) -> anyhow::Result<usize> {
+        self.ahead = None;
+        let lines = context_lines(app, field);
+        if lines.is_empty() {
+            return Ok(0);
+        }
+        let tokens = self.model.vocab().tokenize(lines.as_bytes(), false, false);
+        let mut ctx = self.context(AHEAD_CTX)?;
+        let mut batch = LlamaBatch::new(tokens.len(), 1);
+        for (i, t) in tokens.iter().enumerate() {
+            batch.add(*t, i as i32, &[0], false)?;
+        }
+        ctx.decode(&mut batch).map_err(|e| anyhow!("{e}"))?;
+        // SAFETY: the context borrows `self.model`. It's kept in
+        // `self.ahead`, which is dropped before `self.model` (declaration
+        // order), and replaced or discarded only while the model lives.
+        let ctx = unsafe { std::mem::transmute::<LlamaContext<'_>, LlamaContext<'static>>(ctx) };
+        let n = tokens.len();
+        self.ahead = Some(ReadAhead { tokens, ctx });
+        Ok(n)
+    }
+
+    /// Drops what `prepare` read (its dictation was cancelled, or done).
+    pub fn discard_read_ahead(&mut self) {
+        self.ahead = None;
     }
 
     /// What the model makes of `text` going into `app` at `field`, before
-    /// any checks. None if it ran out of time or tokens.
-    pub fn rewrite(&self, text: &str, app: Option<&str>, field: Option<&Surroundings>) -> anyhow::Result<Option<String>> {
+    /// any checks.
+    pub fn rewrite(&mut self, text: &str, app: Option<&str>, field: Option<&Surroundings>) -> anyhow::Result<Rewrite> {
         let tokens = self.model.vocab().tokenize(text.as_bytes(), false, false).len();
         // Enough for any faithful rewrite; a runaway gives up.
         let max = tokens * 3 / 2 + 16;
         // About a second more than slow machines take for this much text.
         let deadline = Instant::now() + Duration::from_millis(1000 + 25 * tokens as u64);
-        self.complete(&prompt(text, app, field), max, deadline)
+        self.complete(&context_lines(app, field), &prompt(text, app, field), max, deadline)
     }
 
-    /// Greedy completion of `prompt`, up to the end-of-text token. None if
-    /// it needs more than `max` tokens or runs past `deadline`.
+    fn context(&self, n_ctx: u32) -> anyhow::Result<LlamaContext<'_>> {
+        let params = LlamaContextParams::default()
+            .with_n_ctx(NonZeroU32::new(n_ctx))
+            .with_n_batch(n_ctx)
+            .with_n_threads(self.threads)
+            .with_n_threads_batch(self.threads);
+        self.model.new_context(backend()?, params).map_err(|e| anyhow!("{e}"))
+    }
+
+    /// Greedy completion of `prompt`, up to the end-of-text token, or until
+    /// it needs more than `max` tokens or runs past `deadline`. The prompt
+    /// is read in two steps, the context `lines` it starts with and then
+    /// the rest, whether the first was read ahead or not: the same numbers
+    /// either way (one step can round differently and flip a close call).
     ///
     /// Clean text mostly copies the dictation, so after each token the
     /// tokens that followed its last few in the prompt are guessed to come
@@ -527,25 +684,41 @@ impl Model {
     /// decoding keeps exactly the guesses the model would have made one at
     /// a time, so the output is the same; long dictations take about half
     /// the time.
-    fn complete(&self, prompt: &str, max: usize, deadline: Instant) -> anyhow::Result<Option<String>> {
-        let backend = backend()?;
+    fn complete(&mut self, lines: &str, prompt: &str, max: usize, deadline: Instant) -> anyhow::Result<Rewrite> {
         let vocab = self.model.vocab();
         let prompt_tokens = vocab.tokenize(prompt.as_bytes(), false, false);
-        let n_ctx = (prompt_tokens.len() + max + DRAFT + 1).next_multiple_of(256) as u32;
-        let params = LlamaContextParams::default()
-            .with_n_ctx(NonZeroU32::new(n_ctx))
-            .with_n_batch(n_ctx)
-            .with_n_threads(self.threads)
-            .with_n_threads_batch(self.threads);
-        let mut ctx = self.model.new_context(backend, params).map_err(|e| anyhow!("{e}"))?;
+        let lines_tokens = vocab.tokenize(lines.as_bytes(), false, false);
+        let split = if prompt_tokens.len() > lines_tokens.len() && prompt_tokens.starts_with(&lines_tokens) {
+            lines_tokens.len()
+        } else {
+            0
+        };
+        let need = prompt_tokens.len() + max + DRAFT + 1;
+        // The context read ahead, if it read this prompt's first step and
+        // the rest fits; otherwise a new one.
+        let ahead = self.ahead.take_if(|a| split > 0 && a.tokens == lines_tokens && need <= a.ctx.n_ctx() as usize);
+        let (mut ctx, read_ahead) = match ahead {
+            Some(a) => (a.ctx, split),
+            // With context lines, the same size as one read ahead (where it
+            // fits): the same computation, to the bit.
+            None if split > 0 => (self.context((need as u32).max(AHEAD_CTX).next_multiple_of(256))?, 0),
+            None => (self.context(need.next_multiple_of(256) as u32)?, 0),
+        };
+        let vocab = self.model.vocab();
 
-        let mut batch = LlamaBatch::new(n_ctx as usize, 1);
-        let last = prompt_tokens.len() as i32 - 1;
-        for (i, t) in prompt_tokens.iter().enumerate() {
-            batch.add(*t, i as i32, &[0], i as i32 == last)?;
+        let mut batch = LlamaBatch::new(ctx.n_batch() as usize, 1);
+        let last = prompt_tokens.len() - 1;
+        for step in [read_ahead..split, split.max(read_ahead)..prompt_tokens.len()] {
+            if step.is_empty() {
+                continue;
+            }
+            batch.clear();
+            for i in step {
+                batch.add(prompt_tokens[i], i as i32, &[0], i == last)?;
+            }
+            ctx.decode(&mut batch).map_err(|e| anyhow!("{e}"))?;
         }
-        ctx.decode(&mut batch).map_err(|e| anyhow!("{e}"))?;
-        let mut next = argmax(&ctx, last);
+        let mut next = argmax(&ctx, batch.n_tokens() - 1);
         let mut pos = prompt_tokens.len() as i32;
         let mut out: Vec<LlamaToken> = Vec::new();
         loop {
@@ -554,7 +727,7 @@ impl Model {
             }
             out.push(next);
             if out.len() > max || Instant::now() > deadline {
-                return Ok(None);
+                return Ok(Rewrite { text: None, read_ahead });
             }
             let drafts = lookup(&prompt_tokens, &out);
             batch.clear();
@@ -578,7 +751,7 @@ impl Model {
             next = predicted;
         }
         let bytes = vocab.detokenize(&out, false, false);
-        Ok(Some(String::from_utf8_lossy(&bytes).trim().to_string()))
+        Ok(Rewrite { text: Some(String::from_utf8_lossy(&bytes).trim().to_string()), read_ahead })
     }
 }
 
@@ -723,11 +896,19 @@ mod tests {
         let field = Surroundings { before: "I think we should".into(), selected: String::new(), after: String::new() };
         let (ftx, frx) = crossbeam_channel::bounded(1);
         ftx.send(Focus { app: Some("com.apple.mail".into()), name: Some("Mail".into()), field: Some(field), ..Default::default() }).unwrap();
-        polisher.polish(Job { request: 1, text: "um ship it today the tests are green".into(), polish: true, focus: Some(frx) });
-        polisher.polish(Job { request: 2, text: "Ich denke, wir sollten gehen.".into(), polish: false, focus: None });
-        polisher.polish(Job { request: 3, text: "What is the capital of France?".into(), polish: true, focus: None });
+        // The first dictation's field was read ahead when it started.
+        polisher.prepare(1, frx);
+        polisher.polish(Job { request: 1, text: "um ship it today the tests are green".into(), polish: true, focus: None, prepared: true });
+        polisher.polish(Job { request: 2, text: "Ich denke, wir sollten gehen.".into(), polish: false, focus: None, prepared: false });
+        polisher.polish(Job { request: 3, text: "What is the capital of France?".into(), polish: true, focus: None, prepared: false });
+        // A cancelled dictation's field never goes to another.
+        let (gtx, grx) = crossbeam_channel::bounded(1);
+        gtx.send(Focus { name: Some("Notes".into()), ..Default::default() }).unwrap();
+        polisher.prepare(4, grx);
+        polisher.forget(4);
+        polisher.polish(Job { request: 5, text: "Okay.".into(), polish: false, focus: None, prepared: false });
         let mut done = Vec::new();
-        while done.len() < 3 {
+        while done.len() < 4 {
             if let PolishEvent::Done { request, polished, focus } = rx.recv_timeout(Duration::from_secs(30)).expect("done") {
                 done.push((request, polished, focus.and_then(|f| f.name)));
             }
@@ -735,8 +916,43 @@ mod tests {
         assert_eq!(done[0], (1, Some("ship it today. The tests are green.".into()), Some("Mail".into())));
         assert_eq!(done[1], (2, None, None));
         assert_eq!(done[2], (3, Some("What is the capital of France?".into()), None));
+        assert_eq!(done[3], (5, None, None));
         polisher.configure(false, 0);
         assert!(matches!(rx.recv_timeout(Duration::from_secs(5)), Ok(PolishEvent::Status(PolishStatus::Off))));
+    }
+
+    /// Needs the model downloaded: `cargo test --release -p bars-core -- --ignored reading_ahead`.
+    /// Reading where a dictation goes ahead of it must not change what the
+    /// model writes. testdata/polish.txt: one dictation per line,
+    /// `before|text|after` for the text around the cursor.
+    #[test]
+    #[ignore]
+    fn reading_ahead_changes_nothing() {
+        let mut model = Model::load(&models::POLISH.dir().join(MODEL_FILE)).expect("model downloaded");
+        let cases = std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/../../testdata/polish.txt")).unwrap();
+        let mut compared = 0;
+        for line in cases.lines().filter(|l| !l.trim().is_empty()) {
+            let (field, text) = match line.split('|').collect::<Vec<_>>().as_slice() {
+                [before, text, after] => {
+                    (Some(Surroundings { before: before.to_string(), selected: String::new(), after: after.to_string() }), text.to_string())
+                }
+                _ => (None, line.to_string()),
+            };
+            for app in [None, Some("Slack")] {
+                let fresh = model.rewrite(&text, app, field.as_ref()).unwrap();
+                assert_eq!(fresh.read_ahead, 0);
+                let read = model.prepare(app, field.as_ref()).unwrap();
+                let ahead = model.rewrite(&text, app, field.as_ref()).unwrap();
+                assert_eq!(ahead.read_ahead, read, "{line:?}");
+                assert_eq!(ahead.text, fresh.text, "{line:?} in {app:?}");
+                compared += usize::from(read > 0);
+            }
+        }
+        assert!(compared > 30, "{compared}");
+        // What was read for one place is never used for another.
+        let here = Surroundings { before: "Meeting notes:".into(), ..Default::default() };
+        model.prepare(Some("Mail"), Some(&here)).unwrap();
+        assert_eq!(model.rewrite("ship it today", Some("Slack"), None).unwrap().read_ahead, 0);
     }
 
     #[test]

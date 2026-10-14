@@ -155,8 +155,18 @@ struct Pending {
     audio_secs: f32,
     /// The field, being read since the dictation started.
     focus: Option<Receiver<Focus>>,
+    /// The field went to the polisher instead, to read ahead.
+    prepared: bool,
     /// Heard, and being polished.
     transcript: Option<Transcript>,
+}
+
+/// The dictation being recorded.
+struct Recording {
+    /// Its engine request, once it's heard.
+    id: u64,
+    focus: Option<Receiver<Focus>>,
+    prepared: bool,
 }
 
 /// Where insertion finds what had focus.
@@ -233,8 +243,7 @@ struct Controller {
     downloading: Option<(String, Arc<AtomicBool>)>,
     /// Models waiting to download after it.
     download_queue: VecDeque<String>,
-    /// What had focus when the current recording started, being read.
-    capture: Option<Receiver<Focus>>,
+    recording: Option<Recording>,
     capturing: bool,
     mic_testing: bool,
     bound_trigger: Option<String>,
@@ -307,7 +316,7 @@ impl Controller {
             pending: HashMap::new(),
             downloading: None,
             download_queue: VecDeque::new(),
-            capture: None,
+            recording: None,
             capturing: false,
             mic_testing: false,
             bound_trigger: None,
@@ -586,7 +595,15 @@ impl Controller {
         let ins = &self.cfg.insertion;
         let read_field = ins.smart_spacing || self.learning_active() || self.polishing();
         let read_focus = read_field || ins.split_for_agents;
-        self.capture = read_focus.then(|| focus::start_capture(read_field.then_some(focus::CONTEXT_CHARS)));
+        let mut focus = read_focus.then(|| focus::start_capture(read_field.then_some(focus::CONTEXT_CHARS)));
+        let id = self.next_request;
+        self.next_request += 1;
+        // Polish reads where the dictation goes while the user talks.
+        let prepared = self.polishing() && focus.is_some();
+        if let Some(focus) = focus.take_if(|_| prepared) {
+            self.polisher.prepare(id, focus);
+        }
+        self.recording = Some(Recording { id, focus, prepared });
         self.recording_since = Some(Instant::now());
         log::info!("dictation started");
         // Delay the start sound slightly: chords that turn out to be part of
@@ -600,7 +617,7 @@ impl Controller {
             return;
         }
         self.audio.cancel();
-        self.capture = None;
+        self.drop_recording();
         let long_enough = self
             .recording_since
             .is_some_and(|t| t.elapsed() > Duration::from_millis(400));
@@ -620,7 +637,6 @@ impl Controller {
         self.recognizer.reset();
         self.start_cue_at = None;
         self.recording_since = None;
-        let focus = self.capture.take();
         let rec = self.audio.stop();
         if self.cfg.audio.sounds {
             self.audio.cue(Cue::Stop, self.cfg.audio.sound_volume);
@@ -629,19 +645,30 @@ impl Controller {
         let loudness = rec.loudest_window_rms();
         log::info!("recorded {secs:.2}s (peak {:.3}, loudest rms {loudness:.4})", rec.peak);
         if secs < 0.25 {
+            self.drop_recording();
             self.set_phase(if self.pending.is_empty() { Phase::Idle } else { Phase::Transcribing });
             return;
         }
         if loudness < 0.003 {
+            self.drop_recording();
             self.notice(NoticeKind::Warning, "Didn't hear anything — check your microphone");
             self.set_phase(if self.pending.is_empty() { Phase::Idle } else { Phase::Transcribing });
             return;
         }
-        let id = self.next_request;
-        self.next_request += 1;
-        self.pending.insert(id, Pending { audio_secs: secs, focus, transcript: None });
+        let Recording { id, focus, prepared } = self.recording.take().unwrap_or_else(|| {
+            self.next_request += 1;
+            Recording { id: self.next_request - 1, focus: None, prepared: false }
+        });
+        self.pending.insert(id, Pending { audio_secs: secs, focus, prepared, transcript: None });
         self.engine.transcribe(id, rec.samples, self.cfg.model.language.clone());
         self.set_phase(Phase::Transcribing);
+    }
+
+    /// The recording ends without a dictation.
+    fn drop_recording(&mut self) {
+        if let Some(r) = self.recording.take().filter(|r| r.prepared) {
+            self.polisher.forget(r.id);
+        }
     }
 
     fn on_engine(&mut self, ev: EngineEvent) {
@@ -652,7 +679,9 @@ impl Controller {
                 self.emit(Event::LearningAvailable(self.pieces.is_some()));
             }
             EngineEvent::Failed { request, error } => {
-                self.pending.remove(&request);
+                if self.pending.remove(&request).is_some_and(|p| p.prepared) {
+                    self.polisher.forget(request);
+                }
                 self.notice(NoticeKind::Error, format!("Transcription failed: {error}"));
                 self.settle_phase();
             }
@@ -660,16 +689,19 @@ impl Controller {
                 if !self.pending.contains_key(&t.request) {
                     return;
                 }
-                if self.polishing() {
-                    // Every dictation goes through the polisher, so they
-                    // come out in order; only English ones are polished.
-                    let english = !t.text.trim().is_empty() && self.is_english(&t.text);
+                let polishing = self.polishing();
+                // Every dictation goes through the polisher while it's on, so
+                // they come out in order (and it has the fields it read
+                // ahead with); only English ones are polished.
+                if polishing || self.pending.get(&t.request).is_some_and(|p| p.prepared) {
+                    let polish = polishing && !t.text.trim().is_empty() && self.is_english(&t.text);
                     let Some(p) = self.pending.get_mut(&t.request) else { return };
                     self.polisher.polish(polish::Job {
                         request: t.request,
                         text: t.text.clone(),
-                        polish: english,
+                        polish,
                         focus: p.focus.take(),
+                        prepared: p.prepared,
                     });
                     p.transcript = Some(t);
                     return;
