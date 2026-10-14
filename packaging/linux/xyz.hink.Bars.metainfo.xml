@@ -36,6 +36,19 @@
     <internet>first-run</internet>
   </requires>
   <releases>
+    <release version="0.4.0" date="2026-10-14">
+      <description>
+        <ul>
+          <li>Output polish: English dictations are cleaned up on this computer by a small model, Spokenly Cleanup 1 by Spokenly. Filler words, repeats and false starts go, spoken corrections like "no wait" are applied, and numbers, email and web addresses are written as you'd type them. Questions and instructions stay as you said them.</li>
+          <li>Output polish is on by default. Setup downloads its model (639 MB) after the speech model; if you had Bars before, it asks once.</li>
+          <li>Output polish reads the app and the text around the cursor while you're still talking, so less is left to do after you stop.</li>
+          <li>On PCs, Output polish needs a processor with AVX2 (Intel since 2013, AMD since 2015).</li>
+          <li>The Speech model page is now Models, with Output polish below the speech models.</li>
+          <li>Model downloads wait their turn instead of being refused while another one runs.</li>
+          <li>The settings window reaches the top edge, without a line under the title bar.</li>
+        </ul>
+      </description>
+    </release>
     <release version="0.3.0" date="2026-10-12">
       <description>
         <ul>
