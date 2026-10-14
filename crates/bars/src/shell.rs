@@ -6,6 +6,7 @@ use std::time::Duration;
 use gpui_kit::*;
 use bars_core::config::OverlayMode;
 use bars_core::controller::{Command, Phase};
+use bars_core::models;
 
 use crate::brand::TrayState;
 use crate::onboarding::{self, Step};
@@ -39,6 +40,7 @@ pub enum Launch {
 
 const SETUP_NOTIFICATION: &str = "bars-setup";
 const UPDATE_NOTIFICATION: &str = "bars-update";
+const POLISH_NOTIFICATION: &str = "bars-polish";
 /// How often to look for a newer Bars (when allowed), and how long after
 /// starting to look first.
 const UPDATE_EVERY: Duration = Duration::from_secs(24 * 60 * 60);
@@ -103,6 +105,10 @@ impl Shell {
                     this.state.update(cx, |s, cx| s.install_update(cx))
                 }
                 UPDATE_NOTIFICATION => this.show_settings(Some(Page::General), cx),
+                POLISH_NOTIFICATION if response.action_id.is_some() => {
+                    this.state.read(cx).send(Command::DownloadModel(models::POLISH.id.to_string()))
+                }
+                POLISH_NOTIFICATION => this.show_settings(Some(Page::Home), cx),
                 _ => {}
             });
         });
@@ -221,6 +227,7 @@ impl Shell {
                     (Launch::Background, true) => this.notify_setup(cx),
                     (Launch::Background, false) => {}
                 }
+                this.offer_polish(launch, cx);
             });
         })
         .detach();
@@ -272,6 +279,33 @@ impl Shell {
                 .into_iter()
                 .collect(),
         });
+    }
+
+    /// People who had Bars before output polish are asked once to download
+    /// its model: in a notification when Bars started at login, otherwise
+    /// on the Home page that just opened (which keeps asking until they
+    /// answer).
+    fn offer_polish(&mut self, launch: Launch, cx: &mut Context<Self>) {
+        let st = self.state.read(cx);
+        if st.config.polish_offered || !st.polish_needs_download() {
+            return;
+        }
+        if launch == Launch::Background {
+            cx.show_system_notification(SystemNotification {
+                tag: POLISH_NOTIFICATION.into(),
+                title: "New: Output polish".into(),
+                body: format!(
+                    "Bars can now clean up English dictations: fillers, false starts and spoken corrections. It needs a one-time download ({}).",
+                    crate::widgets::fmt_bytes(models::POLISH.size_bytes())
+                )
+                .into(),
+                actions: vec![SystemNotificationAction {
+                    id: "download".into(),
+                    label: "Download".into(),
+                }],
+            });
+        }
+        self.state.update(cx, |s, cx| s.edit_config(cx, |c| c.polish_offered = true));
     }
 
     fn notify_setup(&mut self, cx: &mut Context<Self>) {

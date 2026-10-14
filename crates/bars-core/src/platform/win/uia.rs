@@ -102,6 +102,7 @@ pub fn read_focus(field_chars: Option<usize>) -> Focus {
     unsafe { GetWindowThreadProcessId(hwnd, Some(&mut pid)) };
     Focus {
         app: (pid != 0).then(|| exe_name(pid)).flatten(),
+        name: None,
         pid: (pid != 0).then_some(pid),
         window_title: window_title(hwnd),
         field: field_chars.and_then(|n| field_text(n).ok().flatten()),

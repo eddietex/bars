@@ -4,10 +4,13 @@ use gpui_kit::*;
 use bars_core::controller::Command;
 use bars_core::engine::EngineStatus;
 use bars_core::models::{self, ModelInfo};
+use bars_core::polish::{self, PolishStatus};
 
 use super::SettingsView;
 use crate::theme::{Palette, PaletteExt};
 use crate::widgets::*;
+
+const POLISH_HINT: &str = "Writes what you said the way you'd have typed it: fillers, repeats and false starts go, corrections like “no wait” are applied, numbers become digits. Questions and instructions stay as you said them. English dictations only.";
 
 const LANGUAGES: &[(&str, &str)] = &[
     ("en", "English"),
@@ -52,13 +55,14 @@ impl SettingsView {
             move |v, cx| state.update(cx, |s, cx| s.edit_config(cx, |c| c.model.language = v)),
         );
 
+        let polish = self.polish_section(p, cx);
         v_col()
             .child(page_header(
-                "Speech model",
-                Some("Everything runs on this computer. Audio never leaves it."),
+                "Models",
+                Some("Everything runs on this computer. Audio and text never leave it."),
                 p,
             ))
-            .child(v_col().gap(px(12.)).mb(px(28.)).children(cards))
+            .child(section("Speech", p).mb(px(28.)).child(v_col().gap(px(12.)).children(cards)))
             .when(multilingual, |el| {
                 el.child(section("Language", p).child(rows(
                     p,
@@ -71,6 +75,107 @@ impl SettingsView {
                     .into_any_element()],
                 )))
             })
+            .child(polish)
+    }
+
+    /// Output polish: the switch, and the model that does it.
+    fn polish_section(&self, p: Palette, cx: &mut Context<Self>) -> impl IntoElement {
+        let st = self.state.read(cx);
+        let on = st.config.text.polish;
+        let m = &models::POLISH;
+        let installed = st.installed.contains(m.id);
+        let progress = st.downloads.get(m.id).copied();
+        let error = st.download_errors.get(m.id).cloned();
+        let status = st.polish.clone();
+        let supported = polish::supported();
+        let state = self.state.clone();
+
+        let switch = small_switch("polish", on, move |v, _, cx| {
+            let v = *v;
+            state.update(cx, |s, cx| {
+                s.edit_config(cx, |c| c.text.polish = v);
+                // Turning it on fetches the model it needs.
+                if v && supported && !s.installed.contains(models::POLISH.id) {
+                    s.send(Command::DownloadModel(models::POLISH.id.to_string()));
+                }
+            })
+        });
+
+        let action: AnyElement = if !supported {
+            div().into_any_element()
+        } else if let Some((done, total)) = progress {
+            h_row()
+                .gap(px(10.))
+                .child(
+                    div()
+                        .text_size(px(12.))
+                        .text_color(p.text_muted)
+                        .child(format!("{} / {}", fmt_bytes(done), fmt_bytes(total))),
+                )
+                .child(button("cancel-polish", "Cancel", ButtonKind::Ghost, p).on_click(cx.listener(|this, _, _, cx| {
+                    this.state.read(cx).send(Command::CancelDownload(models::POLISH.id.to_string()))
+                })))
+                .into_any_element()
+        } else if !installed {
+            button("dl-polish", format!("Download · {}", fmt_bytes(m.size_bytes())), ButtonKind::Primary, p)
+                .on_click(cx.listener(|this, _, _, cx| {
+                    this.state.read(cx).send(Command::DownloadModel(models::POLISH.id.to_string()))
+                }))
+                .into_any_element()
+        } else {
+            let badge = match status {
+                _ if !on => badge("Downloaded", p.text_muted).into_any_element(),
+                PolishStatus::Loading => badge("Loading…", p.accent).into_any_element(),
+                PolishStatus::Failed(_) => badge("Failed to load", p.danger).into_any_element(),
+                PolishStatus::Ready | PolishStatus::Unloaded => badge("In use", p.success).into_any_element(),
+                _ => badge("Downloaded", p.text_muted).into_any_element(),
+            };
+            // Like a speech model in use, it can't be deleted while it's on
+            // (and loaded: Windows can't delete a file in use).
+            h_row()
+                .gap(px(6.))
+                .child(badge)
+                .when(!on, |el| {
+                    el.child(icon_button("rm-polish", I::Trash, p.text_muted, p).on_click(cx.listener(|this, _, _, cx| {
+                        this.state.read(cx).send(Command::DeleteModel(models::POLISH.id.to_string()))
+                    })))
+                })
+                .into_any_element()
+        };
+        let detail = if supported {
+            format!("{} by Spokenly · {} · {} · Apache-2.0", m.name, m.languages, fmt_bytes(m.size_bytes()))
+        } else {
+            "This processor can't run it: it needs AVX2 (Intel since 2013, AMD since 2015).".to_string()
+        };
+        let problem = match (&status, error) {
+            (_, Some(e)) => Some(format!("Download failed: {e}")),
+            (PolishStatus::Failed(e), None) if on => Some(e.clone()),
+            (PolishStatus::Missing, None) if on && progress.is_none() => {
+                Some("Output polish is on, but its model isn't downloaded yet.".to_string())
+            }
+            _ => None,
+        };
+
+        section("Output polish", p).child(rows(
+            p,
+            vec![
+                row("Polish English dictations", Some(POLISH_HINT), switch, p).into_any_element(),
+                v_col()
+                    .child(row("Model", Some(&detail), action, p))
+                    .when_some(progress, |el, (done, total)| {
+                        el.child(
+                            div()
+                                .px(px(18.))
+                                .pb(px(14.))
+                                .child(progress_bar(if total > 0 { done as f32 / total as f32 } else { 0.0 }, p)),
+                        )
+                    })
+                    .when_some(problem, |el, e| {
+                        el.child(div().px(px(18.)).pb(px(12.)).text_size(px(12.5)).text_color(p.warning).child(e))
+                    })
+                    .into_any_element(),
+            ],
+        ))
     }
 
     fn model_card(
@@ -111,7 +216,7 @@ impl SettingsView {
                 )
                 .child(
                     button(SharedString::from(format!("cancel-{id}")), "Cancel", ButtonKind::Ghost, p).on_click(
-                        cx.listener(|this, _, _, cx| this.state.read(cx).send(Command::CancelDownload)),
+                        cx.listener(move |this, _, _, cx| this.state.read(cx).send(Command::CancelDownload(id.to_string()))),
                     ),
                 )
                 .into_any_element()

@@ -10,6 +10,7 @@ use gpui_kit::*;
 use bars_core::controller::Command;
 use bars_core::models;
 use bars_core::platform::requirements::{FixAction, ReqId, ReqStatus, Requirement};
+use bars_core::polish;
 
 use crate::state::{AppState, LevelMeter, StateEvent};
 use crate::theme::{FONT, Palette, PaletteExt};
@@ -155,11 +156,20 @@ impl Onboarding {
             }
             Step::Access => self.state.read(cx).send(Command::RefreshPermissions),
             Step::Model => {
-                // Start the download right away; it's the slowest step.
+                // Start the downloads right away; it's the slowest step.
+                // The polish model comes after the speech model.
                 let st = self.state.read(cx);
                 let id = st.config.model.id.clone();
                 if !st.installed.contains(id.as_str()) && !st.downloads.contains_key(&id) {
                     st.send(Command::DownloadModel(id));
+                }
+                let polish = models::POLISH.id;
+                if st.config.text.polish
+                    && polish::supported()
+                    && !st.installed.contains(polish)
+                    && !st.downloads.contains_key(polish)
+                {
+                    st.send(Command::DownloadModel(polish.to_string()));
                 }
             }
             Step::Try => {
@@ -187,7 +197,13 @@ impl Onboarding {
     }
 
     fn finish(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        self.state.update(cx, |s, cx| s.edit_config(cx, |c| c.onboarded = true));
+        self.state.update(cx, |s, cx| {
+            s.edit_config(cx, |c| {
+                c.onboarded = true;
+                // The model step offered output polish.
+                c.polish_offered = true;
+            })
+        });
         self.state.read(cx).send(Command::MicTest(false));
         window.remove_window();
     }
@@ -432,12 +448,29 @@ impl Onboarding {
         let progress = st.downloads.get(m.id).copied();
         let error = st.download_errors.get(m.id).cloned();
         let small = models::find("canary-180m-flash");
+        let polish_card = self.polish_card(p, cx);
+        let st = self.state.read(cx);
+        let polish_on = st.config.text.polish && polish_card.is_some();
+        let polish_downloading = polish_on && st.downloads.contains_key(models::POLISH.id);
+        let ready = installed && (!polish_on || st.installed.contains(models::POLISH.id));
         v_col()
             .gap(px(14.))
             .child(step_icon(I::AudioLines, p))
-            .child(title(if installed { "Speech model ready" } else { "Getting the speech model" }, p))
+            .child(title(
+                match (ready, polish_on) {
+                    (true, true) => "Models ready",
+                    (true, false) => "Speech model ready",
+                    (false, true) => "Getting the models",
+                    (false, false) => "Getting the speech model",
+                },
+                p,
+            ))
             .child(lead(
-                "Bars transcribes with a model that runs entirely on this computer. It's a one-time download.",
+                if polish_on {
+                    "Bars transcribes with a model that runs entirely on this computer, and a second one polishes English dictations. It's a one-time download."
+                } else {
+                    "Bars transcribes with a model that runs entirely on this computer. It's a one-time download."
+                },
                 p,
             ))
             .child(
@@ -489,6 +522,7 @@ impl Onboarding {
                         el.child(div().text_size(px(12.5)).text_color(p.danger).child(format!("Download failed: {e}")))
                     }),
             )
+            .children(polish_card)
             .when(!installed && small.is_some_and(|s| s.id != m.id), |el| {
                 let small = small.expect("checked");
                 el.child(
@@ -500,7 +534,7 @@ impl Onboarding {
                         .hover(|s| s.underline())
                         .on_click(cx.listener(move |this, _, _, cx| {
                             this.state.update(cx, |s, cx| {
-                                s.send(Command::CancelDownload);
+                                s.send(Command::CancelDownload(s.config.model.id.clone()));
                                 s.edit_config(cx, |c| c.model.id = small.id.to_string());
                                 s.send(Command::DownloadModel(small.id.to_string()));
                             })
@@ -512,10 +546,99 @@ impl Onboarding {
                         )),
                 )
             })
-            .when(!installed && progress.is_some(), |el| {
+            .when((!installed && progress.is_some()) || polish_downloading, |el| {
                 el.child(hint("You can continue; the download finishes in the background.", p))
             })
             .into_any_element()
+    }
+
+    /// Output polish and its model, with a switch to go without. None where
+    /// this processor can't run it.
+    fn polish_card(&self, p: Palette, cx: &mut Context<Self>) -> Option<AnyElement> {
+        if !polish::supported() {
+            return None;
+        }
+        let st = self.state.read(cx);
+        let m = &models::POLISH;
+        let on = st.config.text.polish;
+        let installed = st.installed.contains(m.id);
+        let progress = st.downloads.get(m.id).copied().filter(|_| on);
+        let error = st.download_errors.get(m.id).cloned().filter(|_| on);
+        let state = self.state.clone();
+        Some(
+            v_col()
+                .p(px(20.))
+                .gap(px(12.))
+                .rounded(px(14.))
+                .bg(p.surface)
+                .border_1()
+                .border_color(if on && installed { p.success } else { p.border })
+                .child(
+                    h_row()
+                        .justify_between()
+                        .gap(px(16.))
+                        .child(
+                            v_col()
+                                .flex_1()
+                                .min_w_0()
+                                .gap(px(3.))
+                                .child(
+                                    h_row()
+                                        .gap(px(10.))
+                                        .child(div().text_size(px(15.)).font_weight(FontWeight::SEMIBOLD).child("Output polish"))
+                                        .when(on && installed, |el| el.child(badge("Ready", p.success))),
+                                )
+                                .child(
+                                    div()
+                                        .text_size(px(12.5))
+                                        .line_height(px(18.))
+                                        .text_color(p.text_muted)
+                                        .child("Cleans up English dictations: drops fillers and false starts, applies spoken corrections, writes numbers as digits."),
+                                )
+                                .child(div().text_size(px(12.)).text_color(p.text_faint).child(format!(
+                                    "Uses {} by Spokenly · {}",
+                                    m.name,
+                                    fmt_bytes(m.size_bytes())
+                                ))),
+                        )
+                        .child(small_switch("ob-polish", on, move |v, _, cx| {
+                            let v = *v;
+                            state.update(cx, |s, cx| {
+                                s.edit_config(cx, |c| c.text.polish = v);
+                                if v {
+                                    if !s.installed.contains(models::POLISH.id) {
+                                        s.send(Command::DownloadModel(models::POLISH.id.to_string()));
+                                    }
+                                } else {
+                                    s.send(Command::CancelDownload(models::POLISH.id.to_string()));
+                                }
+                            })
+                        })),
+                )
+                .when_some(progress, |el, (done, total)| {
+                    el.child(progress_bar(if total > 0 { done as f32 / total as f32 } else { 0.0 }, p)).child(
+                        div()
+                            .text_size(px(12.))
+                            .text_color(p.text_faint)
+                            .child(if done == 0 {
+                                format!("Waiting for the speech model · {}", fmt_bytes(total))
+                            } else {
+                                format!("{} of {}", fmt_bytes(done), fmt_bytes(total))
+                            }),
+                    )
+                })
+                .when_some(error, |el, e| {
+                    el.child(
+                        h_row()
+                            .gap(px(10.))
+                            .child(div().flex_1().text_size(px(12.5)).text_color(p.danger).child(format!("Download failed: {e}")))
+                            .child(button("retry-polish", "Try again", ButtonKind::Secondary, p).on_click(cx.listener(
+                                |this, _, _, cx| this.state.read(cx).send(Command::DownloadModel(models::POLISH.id.to_string())),
+                            ))),
+                    )
+                })
+                .into_any_element(),
+        )
     }
 
     fn try_it(&self, p: Palette, cx: &mut Context<Self>) -> AnyElement {

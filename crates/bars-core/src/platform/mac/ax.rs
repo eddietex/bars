@@ -255,6 +255,7 @@ pub fn read_focus(field_chars: Option<usize>) -> Focus {
     let pid = app.pid();
     let running = pid.and_then(NSRunningApplication::runningApplicationWithProcessIdentifier);
     let bundle = running.as_ref().and_then(|a| a.bundleIdentifier()).map(|s| s.to_string());
+    let name = running.as_ref().and_then(|a| a.localizedName()).map(|s| s.to_string());
     if let Some(pid) = pid {
         expose_accessibility(&app, pid, bundle.as_deref());
     }
@@ -263,6 +264,7 @@ pub fn read_focus(field_chars: Option<usize>) -> Focus {
     let field = field_chars.and_then(|n| app.element("AXFocusedUIElement").and_then(|f| surroundings(&f, n, terminal)));
     Focus {
         app: bundle,
+        name,
         pid: pid.map(|p| p as u32),
         window_title,
         field,

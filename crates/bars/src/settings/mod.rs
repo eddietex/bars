@@ -48,7 +48,7 @@ impl Page {
         match self {
             Page::Home => "Home",
             Page::General => "Shortcut & input",
-            Page::Model => "Speech model",
+            Page::Model => "Models",
             Page::Dictionary => "Dictionary",
             Page::History => "History",
             Page::Setup => "Setup",

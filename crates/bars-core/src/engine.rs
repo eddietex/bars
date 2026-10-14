@@ -313,6 +313,7 @@ pub fn load(info: &ModelInfo, dir: &Path, _threads: Option<usize>) -> anyhow::Re
     let model: Box<dyn SpeechModel + Send> = match info.family {
         Family::Parakeet => Box::new(ParakeetModel::load(dir, &q).map_err(|e| anyhow!("{e}"))?),
         Family::Canary => Box::new(CanaryModel::load(dir, &q).map_err(|e| anyhow!("{e}"))?),
+        Family::Polish => anyhow::bail!("{} is not a speech model", info.name),
     };
     Ok(model)
 }

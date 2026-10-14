@@ -13,6 +13,7 @@ use bars_core::history::{Entry, Stats};
 use bars_core::hotkey::Chord;
 use bars_core::models;
 use bars_core::platform::Permissions;
+use bars_core::polish::PolishStatus;
 use bars_core::update::{self, Release};
 
 /// Mic level, kept separate so 60 Hz updates only re-render the overlay.
@@ -97,6 +98,7 @@ pub struct AppState {
     pub learned: Option<(String, String)>,
     /// The selected model supports learning from corrections.
     pub learning_available: bool,
+    pub polish: PolishStatus,
     pub devices: Vec<InputDevice>,
     /// The latest dictation's text and how many finished this session
     /// (kept even when history isn't saved).
@@ -136,6 +138,7 @@ impl AppState {
             secure_input: None,
             learned: None,
             learning_available: false,
+            polish: PolishStatus::Off,
             // Filled in off the UI thread (see refresh_devices).
             devices: Vec::new(),
             last_transcript: None,
@@ -367,9 +370,19 @@ impl AppState {
                 cx.emit(StateEvent::Learned);
             }
             Event::LearningAvailable(on) => self.learning_available = on,
+            Event::Polish(s) => self.polish = s,
             Event::Config(cfg) => self.config = *cfg,
         }
         cx.notify();
+    }
+
+    /// Output polish is on but its model isn't here: people who had Bars
+    /// before it are asked to download it.
+    pub fn polish_needs_download(&self) -> bool {
+        self.config.onboarded
+            && self.config.text.polish
+            && bars_core::polish::supported()
+            && !self.installed.contains(models::POLISH.id)
     }
 
     pub fn active_model(&self) -> Option<&'static models::ModelInfo> {

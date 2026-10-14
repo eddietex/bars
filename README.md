@@ -7,8 +7,9 @@ speak, let go: the text appears wherever your cursor is. Nothing leaves your
 computer.
 
 Bars is built in Rust with [GPUI](https://www.gpui.rs) (Zed's UI framework,
-via [GPUI Kit](https://gpui-kit.com)) and runs NVIDIA's Parakeet speech models
-on the CPU with ONNX Runtime.
+via [GPUI Kit](https://gpui-kit.com)), runs NVIDIA's Parakeet speech models
+on the CPU with ONNX Runtime, and polishes English dictations with
+Spokenly Cleanup 1 on llama.cpp.
 
 ## Using it
 
@@ -42,6 +43,17 @@ the model was unsure of that look or sound like what it wrote, never
 rewordings or everyday words; less clear ones wait under Suggestions on the
 Dictionary page until they're seen again. Only the word pairs are kept.
 
+English dictations are polished by a second small model, Spokenly Cleanup 1
+by Spokenly: filler words, repeats and false starts go, spoken corrections
+are applied ("send it to John, no wait, to Maria"), and numbers, email
+addresses and web addresses are written as you'd type them. It also sees
+the app's name and the text around the cursor, to continue a sentence.
+Questions and instructions stay as you said them, so dictating to a coding
+agent is safe, and Bars checks every result: one that adds words of its
+own, loses most of what you said or takes too long is dropped, and the
+dictation goes in as heard. Output polish is on by default, downloads during
+setup and can be turned off on the Models page.
+
 Once a day Bars looks for a newer version: it fetches a small file
 (`latest.json`) from the latest GitHub release, and sends nothing else. It
 only tells you, with a notification and in the tray menu; nothing is
@@ -62,6 +74,20 @@ All models run locally on the CPU (int8 ONNX). Measured on an 11 s clip:
 
 Models download from Hugging Face on first run into
 `~/.local/share/bars/models` (Flatpak: `~/.var/app/xyz.hink.Bars/data`).
+
+### Polish model
+
+[Spokenly Cleanup 1](https://huggingface.co/spokenly/cleanup-1) by Spokenly
+(a fine-tune of Qwen3-0.6B, Apache-2.0; its license and notice download
+with it) is 639 MB as 8-bit GGUF and runs on the CPU with llama.cpp. On an
+M4 Pro a typical dictation takes about 45 ms and a 90-word email about
+190 ms, two to two and a half times that on two cores. Most of a clean-up
+copies the dictation, so Bars guesses the next tokens from it and has the
+model check them all in one pass, which halves the time without changing
+the result. Metal isn't used: it isn't faster for a model this small, and
+it compiles its shaders for 15 seconds the first time each new version
+starts. On x86-64 polish needs AVX2 (Intel since 2013, AMD since 2015).
+Dictations that look like another language are left alone.
 Adding a model is a catalog entry in `crates/bars-core/src/models.rs`; any
 engine supported by [transcribe-rs](https://github.com/cjpais/transcribe-rs)
 (Parakeet, Canary, Moonshine, SenseVoice, Whisper...) can be wired in.
@@ -102,12 +128,14 @@ alike. Ctrl+V and Ctrl+Shift+V are available too.
 
 Development happens in a toolbox/distrobox with Rust, a C compiler and the
 usual headers (`wayland-devel libxkbcommon-devel alsa-lib-devel
-fontconfig-devel vulkan-loader-devel`).
+fontconfig-devel vulkan-loader-devel`). llama.cpp (polish) also needs
+CMake and libclang (`cmake clang-devel`; on macOS `brew install cmake`).
 
 ```sh
 cargo run -p bars                       # debug build
 cargo test -p bars-core                 # core unit tests
 cargo run --release -p bars-core --example bench -- testdata/jfk.wav   # model speed
+cargo run --release -p bars-core --example polish -- "um so i think we should uh ship it"   # polish
 cargo run -p bars-core --example headless   # controller without UI
 ```
 
@@ -175,6 +203,8 @@ crates/bars-core   engine, audio, hotkeys, text injection, config, history
   src/audio.rs        cpal capture (PulseAudio/PipeWire), resampling, cues
   src/text.rs         filler removal, dictionary, snippets, voice commands
   src/learn.rs        learning dictionary words from corrections (tested)
+  src/polish.rs       polish: Spokenly Cleanup 1 on llama.cpp, and the checks
+                      on what it returns (tested)
   src/update.rs       update checks (GitHub Releases), installs on request
   src/platform/       OS backends: linux/ (evdev, uinput, portals, data-control
                       clipboard, AT-SPI), win/ (keyboard hook, clipboard, UI

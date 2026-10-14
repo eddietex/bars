@@ -18,6 +18,9 @@ pub struct Config {
     pub ui: UiConfig,
     /// Set once the first-run setup has been completed.
     pub onboarded: bool,
+    /// The output polish model was offered: in setup, or once to people
+    /// who had Bars before it.
+    pub polish_offered: bool,
 }
 
 impl Default for Config {
@@ -30,6 +33,7 @@ impl Default for Config {
             text: TextConfig::default(),
             ui: UiConfig::default(),
             onboarded: false,
+            polish_offered: false,
         }
     }
 }
@@ -214,6 +218,9 @@ pub struct TextConfig {
     /// Learn dictionary words from corrections made after dictating
     /// (Parakeet models only).
     pub learn: bool,
+    /// Polish English dictations with a small local model (see `polish`):
+    /// false starts and spoken corrections resolved, numbers as digits.
+    pub polish: bool,
     pub suggestions: Vec<Suggestion>,
     /// Corrections undone or dismissed: never suggested again.
     pub ignored: Vec<Replacement>,
@@ -227,6 +234,7 @@ impl Default for TextConfig {
             dictionary: Vec::new(),
             snippets: Vec::new(),
             learn: true,
+            polish: true,
             suggestions: Vec::new(),
             ignored: Vec::new(),
         }

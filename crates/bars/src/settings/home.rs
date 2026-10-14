@@ -5,6 +5,7 @@ use gpui_kit::*;
 use bars_core::controller::{Command, Phase};
 use bars_core::history::Entry;
 use bars_core::hotkey::Activation;
+use bars_core::models;
 
 use super::{Page, SettingsView};
 use crate::theme::{Palette, PaletteExt};
@@ -20,6 +21,7 @@ impl SettingsView {
         let recent: Vec<Entry> = st.history.iter().rev().take(6).cloned().collect();
         let phase = st.phase;
         let needs_setup = !st.setup_complete();
+        let offer_polish = !needs_setup && st.polish_needs_download();
 
         let how = match activation {
             Activation::HoldOrDoubleTap => "Hold to talk, release to insert. Double-tap to go hands-free.",
@@ -29,6 +31,7 @@ impl SettingsView {
 
         v_col()
             .when(needs_setup, |el| el.child(self.setup_banner(p, cx)))
+            .when(offer_polish, |el| el.child(self.polish_banner(p, cx)))
             .child(
                 // Hero: the one thing to remember.
                 v_col()
@@ -145,6 +148,76 @@ impl SettingsView {
                 button("go-setup", "Continue", ButtonKind::Primary, p)
                     .on_click(cx.listener(|this, _, _, cx| this.go(Page::Setup, cx))),
             )
+    }
+
+    /// Output polish is new to people who had Bars before it: offer its
+    /// model, and follow the download.
+    fn polish_banner(&self, p: Palette, cx: &mut Context<Self>) -> impl IntoElement {
+        let st = self.state.read(cx);
+        let m = &models::POLISH;
+        let progress = st.downloads.get(m.id).copied();
+        let error = st.download_errors.get(m.id).cloned();
+        h_row()
+            .gap(px(14.))
+            .p(px(16.))
+            .mb(px(20.))
+            .rounded(px(12.))
+            .bg(p.accent_soft)
+            .border_1()
+            .border_color(p.accent_soft)
+            .child(icon(I::Sparkles, p.accent_text, 18.))
+            .child(
+                v_col()
+                    .flex_1()
+                    .min_w_0()
+                    .gap(px(2.))
+                    .child(div().text_size(px(14.)).font_weight(FontWeight::SEMIBOLD).child("New: Output polish"))
+                    .child(div().text_size(px(12.5)).line_height(px(18.)).text_color(p.text_muted).child(format!(
+                        "Bars can now clean up English dictations: fillers, false starts and spoken corrections go, numbers become digits. It needs a one-time download ({}).",
+                        fmt_bytes(m.size_bytes())
+                    )))
+                    .when_some(progress, |el, (done, total)| {
+                        el.child(
+                            v_col()
+                                .gap(px(6.))
+                                .pt(px(8.))
+                                .child(progress_bar(if total > 0 { done as f32 / total as f32 } else { 0.0 }, p))
+                                .child(
+                                    div()
+                                        .text_size(px(12.))
+                                        .text_color(p.text_muted)
+                                        .child(format!("{} of {}", fmt_bytes(done), fmt_bytes(total))),
+                                ),
+                        )
+                    })
+                    .when_some(error, |el, e| {
+                        el.child(div().pt(px(4.)).text_size(px(12.5)).text_color(p.danger).child(format!("Download failed: {e}")))
+                    }),
+            )
+            .when(progress.is_none(), |el| {
+                el.child(
+                    h_row()
+                        .gap(px(6.))
+                        .child(button("polish-later", "Not now", ButtonKind::Ghost, p).on_click(cx.listener(
+                            |this, _, _, cx| {
+                                this.state.update(cx, |s, cx| {
+                                    s.edit_config(cx, |c| {
+                                        c.text.polish = false;
+                                        c.polish_offered = true;
+                                    })
+                                })
+                            },
+                        )))
+                        .child(button("polish-download", "Download", ButtonKind::Primary, p).on_click(cx.listener(
+                            |this, _, _, cx| {
+                                this.state.update(cx, |s, cx| {
+                                    s.send(Command::DownloadModel(models::POLISH.id.to_string()));
+                                    s.edit_config(cx, |c| c.polish_offered = true);
+                                })
+                            },
+                        ))),
+                )
+            })
     }
 
     pub fn entry_row(&self, e: &Entry, p: Palette, cx: &mut Context<Self>) -> impl IntoElement {

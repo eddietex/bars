@@ -7,6 +7,7 @@ pub mod hotkey;
 pub mod learn;
 pub mod models;
 pub mod paths;
+pub mod polish;
 pub mod text;
 pub mod update;
 pub mod controller;

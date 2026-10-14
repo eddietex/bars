@@ -22,6 +22,9 @@ pub const CONTEXT_CHARS: usize = 240;
 pub struct Focus {
     /// Bundle identifier (macOS) or lowercase executable name.
     pub app: Option<String>,
+    /// The app's name as people know it ("Slack"), where the system says
+    /// (macOS).
+    pub name: Option<String>,
     pub pid: Option<u32>,
     pub window_title: Option<String>,
     /// The text around the cursor. None for password fields, or when the

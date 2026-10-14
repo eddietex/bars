@@ -198,6 +198,7 @@ pub fn read_focus(field_chars: Option<usize>) -> Focus {
         .map(|s| s.trim().to_lowercase());
     Focus {
         app,
+        name: None,
         pid,
         window_title: a.window_title(&bus, &path),
         field: field_chars.and_then(|n| a.surroundings(&bus, &path, n)),

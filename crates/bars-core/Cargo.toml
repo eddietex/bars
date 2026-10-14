@@ -28,6 +28,10 @@ ureq = { version = "3", default-features = false, features = ["rustls", "gzip", 
 sha2 = "0.10"
 semver = "1"
 transcribe-rs = { version = "0.3.12", features = ["onnx"] }
+# Polish (Spokenly Cleanup 1) runs on llama.cpp, on the CPU (see
+# .cargo/config.toml). No OpenMP, so nothing extra to ship.
+llama-cpp-2 = { version = "0.1.159", default-features = false }
+llama-cpp-sys-2 = { version = "0.1.159", default-features = false }
 
 [dev-dependencies]
 env_logger = "0.11"

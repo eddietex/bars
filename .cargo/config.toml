@@ -1,0 +1,18 @@
+# llama.cpp, which runs polish, is built for the CPU only. The model is
+# small enough that the CPU is as fast as the GPU (on an M4 Pro, faster),
+# and Metal would compile its shaders for 15+ seconds the first time each
+# new version of Bars starts.
+#
+# On x86-64 its CPU code needs AVX2 (Intel Haswell, AMD Excavator and
+# later). ggml turns these on by itself, except in reproducible builds
+# (Flatpak sets SOURCE_DATE_EPOCH), which would leave it several times
+# slower. Only ggml's CPU backend gets them, and Bars uses it only after
+# checking the processor has them (polish::supported). Ignored on ARM.
+[env]
+GGML_METAL = "OFF"
+GGML_SSE42 = "ON"
+GGML_AVX = "ON"
+GGML_AVX2 = "ON"
+GGML_FMA = "ON"
+GGML_F16C = "ON"
+GGML_BMI2 = "ON"

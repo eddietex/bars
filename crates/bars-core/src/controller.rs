@@ -14,7 +14,7 @@ use crossbeam_channel::{Receiver, Sender, select, unbounded};
 
 use crate::audio::{Audio, Cue};
 use crate::config::{Config, InsertionConfig, Replacement, Suggestion};
-use crate::engine::{Engine, EngineEvent, EngineStatus};
+use crate::engine::{Engine, EngineEvent, EngineStatus, Transcript};
 use crate::history::{self, History, Stats};
 use crate::hotkey::{Activation, Chord, HotkeyEvent, Intent, Mods, Recognizer};
 use crate::learn::{self, Heard, Pieces, Tracker, Verdict};
@@ -22,6 +22,7 @@ use crate::models;
 use crate::paths;
 use crate::platform::focus::{self, Focus};
 use crate::platform::{self, Hotkeys, Injector, Inserted, Permissions};
+use crate::polish::{self, PolishEvent, PolishStatus, Polisher};
 use crate::text::{self, TextProcessor};
 
 /// Requests from the UI (or tray, D-Bus, CLI).
@@ -40,8 +41,9 @@ pub enum Command {
     MicTest(bool),
     /// Open a system settings page or link.
     OpenUrl(String),
+    /// Downloads a model (speech or polish); one at a time, the rest wait.
     DownloadModel(String),
-    CancelDownload,
+    CancelDownload(String),
     DeleteModel(String),
     RefreshPermissions,
     /// Cheap re-check while the setup assistant waits for the user to grant
@@ -121,6 +123,7 @@ pub enum Event {
     Learned { from: String, to: String },
     /// Whether learning from corrections works with the selected model.
     LearningAvailable(bool),
+    Polish(PolishStatus),
     Config(Box<Config>),
 }
 
@@ -150,6 +153,20 @@ pub fn spawn(config: Config, ui: EventSender) -> ControllerHandle {
 struct Pending {
     /// Audio length, for stats.
     audio_secs: f32,
+    /// The field, being read since the dictation started.
+    focus: Option<Receiver<Focus>>,
+    /// Heard, and being polished.
+    transcript: Option<Transcript>,
+}
+
+/// Where insertion finds what had focus.
+enum Field {
+    /// Being read since the dictation started.
+    Reading(Option<Receiver<Focus>>),
+    /// Already read (polish needed it first).
+    Read(Option<Focus>),
+    /// Read it now ("Paste last").
+    Now,
 }
 
 enum InsertJob {
@@ -158,17 +175,14 @@ enum InsertJob {
         cfg: InsertionConfig,
         /// Dictionary words, which keep their capital in smart spacing.
         names: Vec<String>,
-        /// Read the focused field now, rather than use what was read when
-        /// the dictation started (e.g. "Paste last").
-        fresh: bool,
+        field: Field,
         /// Watch the field for corrections to learn from (the engine
         /// request the text came from).
         watch: Option<u64>,
     },
     Copy(String),
-    /// Dictation started: note which app/window should receive the text,
-    /// and read what's around the cursor while the user talks.
-    RememberTarget { read_focus: bool, read_field: bool },
+    /// Dictation started: note which app/window should receive the text.
+    RememberTarget,
 }
 
 /// How long insertion waits for the focused field to be read.
@@ -200,6 +214,9 @@ struct Controller {
     audio: Audio,
     engine: Engine,
     engine_rx: Receiver<EngineEvent>,
+    polisher: Polisher,
+    polish_rx: Receiver<PolishEvent>,
+    polish_status: PolishStatus,
     hotkeys: Hotkeys,
     hotkey_rx: Receiver<HotkeyEvent>,
     hotkey_tx: Sender<HotkeyEvent>,
@@ -212,7 +229,12 @@ struct Controller {
     pending: HashMap<u64, Pending>,
     history: History,
     text: TextProcessor,
-    download_cancel: Option<Arc<AtomicBool>>,
+    /// The model downloading, and how to stop it.
+    downloading: Option<(String, Arc<AtomicBool>)>,
+    /// Models waiting to download after it.
+    download_queue: VecDeque<String>,
+    /// What had focus when the current recording started, being read.
+    capture: Option<Receiver<Focus>>,
     capturing: bool,
     mic_testing: bool,
     bound_trigger: Option<String>,
@@ -253,6 +275,8 @@ impl Controller {
         }));
         let (engine_tx, engine_rx) = unbounded();
         let engine = Engine::spawn(engine_tx);
+        let (polish_tx, polish_rx) = unbounded();
+        let polisher = Polisher::spawn(polish_tx);
         let (hotkey_tx, hotkey_rx) = unbounded();
         let hotkeys = Hotkeys::start(cfg.hotkey.backend, cfg.hotkey.chord.clone(), hotkey_tx.clone());
         let (internal_tx, internal_rx) = unbounded();
@@ -269,6 +293,9 @@ impl Controller {
             audio,
             engine,
             engine_rx,
+            polisher,
+            polish_rx,
+            polish_status: PolishStatus::Off,
             hotkeys,
             hotkey_rx,
             hotkey_tx,
@@ -278,7 +305,9 @@ impl Controller {
             start_cue_at: None,
             next_request: 1,
             pending: HashMap::new(),
-            download_cancel: None,
+            downloading: None,
+            download_queue: VecDeque::new(),
+            capture: None,
             capturing: false,
             mic_testing: false,
             bound_trigger: None,
@@ -326,10 +355,11 @@ impl Controller {
         self.emit_hotkey_status();
         self.emit_history();
         self.engine.select(&self.cfg.model.id, self.cfg.model.threads, self.cfg.model.unload_after_mins);
+        self.polisher.configure(self.cfg.text.polish, self.cfg.model.unload_after_mins);
         if self.cfg.audio.keep_warm {
             self.audio.set_warm(self.cfg.audio.device.clone(), true);
         }
-        if self.cfg.insertion.smart_spacing || self.cfg.insertion.split_for_agents {
+        if reads_focus(&self.cfg) {
             platform::prepare_focus_reading();
         }
 
@@ -362,6 +392,11 @@ impl Controller {
                 recv(self.engine_rx) -> ev => {
                     if let Ok(ev) = ev {
                         self.on_engine(ev);
+                    }
+                }
+                recv(self.polish_rx) -> ev => {
+                    if let Ok(ev) = ev {
+                        self.on_polish(ev);
                     }
                 }
                 recv(self.internal_rx) -> ev => {
@@ -546,12 +581,12 @@ impl Controller {
         self.audio.start(self.cfg.audio.device.clone(), self.cfg.audio.keep_warm);
         // Stop watching earlier dictations for corrections.
         self.watch_generation.fetch_add(1, Ordering::Relaxed);
-        let learning = self.learning_active();
+        let _ = self.inserter.send(InsertJob::RememberTarget);
+        // Read what's around the cursor while the user talks.
         let ins = &self.cfg.insertion;
-        let _ = self.inserter.send(InsertJob::RememberTarget {
-            read_focus: ins.smart_spacing || ins.split_for_agents || learning,
-            read_field: ins.smart_spacing || learning,
-        });
+        let read_field = ins.smart_spacing || self.learning_active() || self.polishing();
+        let read_focus = read_field || ins.split_for_agents;
+        self.capture = read_focus.then(|| focus::start_capture(read_field.then_some(focus::CONTEXT_CHARS)));
         self.recording_since = Some(Instant::now());
         log::info!("dictation started");
         // Delay the start sound slightly: chords that turn out to be part of
@@ -565,6 +600,7 @@ impl Controller {
             return;
         }
         self.audio.cancel();
+        self.capture = None;
         let long_enough = self
             .recording_since
             .is_some_and(|t| t.elapsed() > Duration::from_millis(400));
@@ -584,6 +620,7 @@ impl Controller {
         self.recognizer.reset();
         self.start_cue_at = None;
         self.recording_since = None;
+        let focus = self.capture.take();
         let rec = self.audio.stop();
         if self.cfg.audio.sounds {
             self.audio.cue(Cue::Stop, self.cfg.audio.sound_volume);
@@ -602,7 +639,7 @@ impl Controller {
         }
         let id = self.next_request;
         self.next_request += 1;
-        self.pending.insert(id, Pending { audio_secs: secs });
+        self.pending.insert(id, Pending { audio_secs: secs, focus, transcript: None });
         self.engine.transcribe(id, rec.samples, self.cfg.model.language.clone());
         self.set_phase(Phase::Transcribing);
     }
@@ -620,65 +657,122 @@ impl Controller {
                 self.settle_phase();
             }
             EngineEvent::Done(t) => {
-                let Some(p) = self.pending.remove(&t.request) else { return };
-                let cleaned = self.text.process(&t.text);
-                if cleaned.is_empty() {
-                    self.notice(NoticeKind::Info, "No speech recognized");
-                    self.settle_phase();
+                if !self.pending.contains_key(&t.request) {
                     return;
                 }
-                if let Some(heard) = t.heard.clone() {
-                    self.heard.push_back((t.request, heard));
-                    if self.heard.len() > HEARD_KEPT {
-                        self.heard.pop_front();
-                    }
-                }
-                let _ = self.inserter.send(InsertJob::Text {
-                    text: cleaned.clone(),
-                    cfg: self.cfg.insertion.clone(),
-                    names: self.dictionary_words(),
-                    fresh: false,
-                    watch: self.learning_active().then_some(t.request),
-                });
-                // What was said stays out of the logs (which can end up in
-                // the system journal), unless debugging.
-                log::info!(
-                    "transcribed {:.1}s in {} ms ({} words)",
-                    p.audio_secs,
-                    t.infer_ms,
-                    text::word_count(&cleaned)
-                );
-                log::debug!("transcript: {cleaned:?}");
-                // Kept in memory only, for "Paste last".
-                self.last_text = Some(cleaned.clone());
-                self.emit(Event::Transcript(cleaned.clone()));
-                // History off: nothing is recorded, on disk or in the
-                // history list (which a later rewrite would save).
-                if self.cfg.ui.save_history {
-                    let entry = history::Entry {
-                        id: self.history.next_id(),
-                        at: Local::now(),
-                        words: text::word_count(&cleaned),
-                        raw: (t.text != cleaned).then(|| t.text.clone()),
-                        text: cleaned,
-                        model: t.model,
-                        audio_secs: p.audio_secs,
-                        infer_ms: t.infer_ms,
-                    };
-                    self.entry_requests.push_back((entry.id, t.request));
-                    if self.entry_requests.len() > HEARD_KEPT {
-                        self.entry_requests.pop_front();
-                    }
-                    self.history.append(entry.clone());
-                    self.emit(Event::Dictated(entry));
-                    self.emit(Event::History {
-                        entries: Vec::new(),
-                        stats: self.history.stats(),
+                if self.polishing() {
+                    // Every dictation goes through the polisher, so they
+                    // come out in order; only English ones are polished.
+                    let english = !t.text.trim().is_empty() && self.is_english(&t.text);
+                    let Some(p) = self.pending.get_mut(&t.request) else { return };
+                    self.polisher.polish(polish::Job {
+                        request: t.request,
+                        text: t.text.clone(),
+                        polish: english,
+                        focus: p.focus.take(),
                     });
+                    p.transcript = Some(t);
+                    return;
                 }
-                self.settle_phase();
+                let Some(p) = self.pending.remove(&t.request) else { return };
+                self.deliver(t, p.audio_secs, None, Field::Reading(p.focus));
             }
         }
+    }
+
+    fn on_polish(&mut self, ev: PolishEvent) {
+        match ev {
+            PolishEvent::Status(s) => {
+                self.polish_status = s.clone();
+                self.emit(Event::Polish(s));
+            }
+            PolishEvent::Done { request, polished, focus } => {
+                let Some(p) = self.pending.remove(&request) else { return };
+                let Some(t) = p.transcript else { return };
+                self.deliver(t, p.audio_secs, polished, Field::Read(focus));
+            }
+        }
+    }
+
+    /// Dictations go through polish: it's on, and its model is loaded or
+    /// can be.
+    fn polishing(&self) -> bool {
+        self.cfg.text.polish
+            && matches!(self.polish_status, PolishStatus::Ready | PolishStatus::Loading | PolishStatus::Unloaded)
+    }
+
+    /// Whether a dictation is in English: the language set for the speech
+    /// model, the only one it knows, or else what the words look like.
+    fn is_english(&self, text: &str) -> bool {
+        if let Some(lang) = &self.cfg.model.language {
+            return lang == "en";
+        }
+        match models::find(&self.cfg.model.id) {
+            // Canary hears English unless told otherwise (engine.rs).
+            Some(m) if m.family == models::Family::Canary || !m.multilingual => true,
+            _ => polish::looks_english(text),
+        }
+    }
+
+    /// The end of a dictation: clean-up, insertion and history. `polished`
+    /// is the polish model's version of what was heard, if any.
+    fn deliver(&mut self, t: Transcript, audio_secs: f32, polished: Option<String>, field: Field) {
+        let cleaned = self.text.process(polished.as_deref().unwrap_or(&t.text));
+        if cleaned.is_empty() {
+            self.notice(NoticeKind::Info, "No speech recognized");
+            self.settle_phase();
+            return;
+        }
+        if let Some(heard) = t.heard.clone() {
+            self.heard.push_back((t.request, heard));
+            if self.heard.len() > HEARD_KEPT {
+                self.heard.pop_front();
+            }
+        }
+        let _ = self.inserter.send(InsertJob::Text {
+            text: cleaned.clone(),
+            cfg: self.cfg.insertion.clone(),
+            names: self.dictionary_words(),
+            field,
+            watch: self.learning_active().then_some(t.request),
+        });
+        // What was said stays out of the logs (which can end up in the
+        // system journal), unless debugging.
+        log::info!(
+            "transcribed {audio_secs:.1}s in {} ms ({} words{})",
+            t.infer_ms,
+            text::word_count(&cleaned),
+            if polished.is_some() { ", polished" } else { "" }
+        );
+        log::debug!("transcript: {cleaned:?}");
+        // Kept in memory only, for "Paste last".
+        self.last_text = Some(cleaned.clone());
+        self.emit(Event::Transcript(cleaned.clone()));
+        // History off: nothing is recorded, on disk or in the history list
+        // (which a later rewrite would save).
+        if self.cfg.ui.save_history {
+            let entry = history::Entry {
+                id: self.history.next_id(),
+                at: Local::now(),
+                words: text::word_count(&cleaned),
+                raw: (t.text != cleaned).then(|| t.text.clone()),
+                text: cleaned,
+                model: t.model,
+                audio_secs,
+                infer_ms: t.infer_ms,
+            };
+            self.entry_requests.push_back((entry.id, t.request));
+            if self.entry_requests.len() > HEARD_KEPT {
+                self.entry_requests.pop_front();
+            }
+            self.history.append(entry.clone());
+            self.emit(Event::Dictated(entry));
+            self.emit(Event::History {
+                entries: Vec::new(),
+                stats: self.history.stats(),
+            });
+        }
+        self.settle_phase();
     }
 
     /// What dictionary entries write, which smart spacing never lowercases.
@@ -732,19 +826,28 @@ impl Controller {
                 }
             }
             Command::DownloadModel(id) => self.download(id),
-            Command::CancelDownload => {
-                if let Some(c) = &self.download_cancel {
-                    c.store(true, Ordering::Relaxed);
+            Command::CancelDownload(id) => {
+                if let Some((current, cancel)) = &self.downloading
+                    && *current == id
+                {
+                    cancel.store(true, Ordering::Relaxed);
+                }
+                if let Some(i) = self.download_queue.iter().position(|q| *q == id) {
+                    self.download_queue.remove(i);
+                    self.emit(Event::DownloadFinished { id, error: Some("cancelled".into()) });
                 }
             }
             Command::DeleteModel(id) => {
-                if let Some(m) = models::find(&id) {
+                if let Some(m) = models::find_any(&id) {
                     if let Err(e) = m.delete() {
                         self.notice(NoticeKind::Error, format!("Couldn't delete {}: {e}", m.name));
                     }
                     if id == self.cfg.model.id {
                         self.engine.unload();
                         self.emit(Event::Engine(EngineStatus::Missing(id.clone())));
+                    }
+                    if id == models::POLISH.id {
+                        self.polisher.recheck();
                     }
                     self.emit(Event::DownloadFinished { id, error: None });
                 }
@@ -769,7 +872,7 @@ impl Controller {
                         text: last,
                         cfg: self.cfg.insertion.clone(),
                         names: self.dictionary_words(),
-                        fresh: true,
+                        field: Field::Now,
                         watch: None,
                     });
                 }
@@ -875,7 +978,9 @@ impl Controller {
         if cfg.text != old.text {
             self.text = TextProcessor::new(&cfg.text);
         }
-        let reads_focus = |c: &Config| c.insertion.smart_spacing || c.insertion.split_for_agents;
+        if cfg.text.polish != old.text.polish || cfg.model.unload_after_mins != old.model.unload_after_mins {
+            self.polisher.configure(cfg.text.polish, cfg.model.unload_after_mins);
+        }
         if reads_focus(cfg) && !reads_focus(&old) {
             platform::prepare_focus_reading();
         }
@@ -885,13 +990,18 @@ impl Controller {
     }
 
     fn download(&mut self, id: String) {
-        let Some(info) = models::find(&id) else { return };
-        if self.download_cancel.is_some() {
-            self.notice(NoticeKind::Info, "Another download is in progress");
+        let Some(info) = models::find_any(&id) else { return };
+        if self.downloading.as_ref().is_some_and(|(d, _)| *d == id) || self.download_queue.contains(&id) {
+            return;
+        }
+        if self.downloading.is_some() {
+            // One at a time: this one is next.
+            self.emit(Event::Download { id: id.clone(), done: 0, total: info.size_bytes() });
+            self.download_queue.push_back(id);
             return;
         }
         let cancel = Arc::new(AtomicBool::new(false));
-        self.download_cancel = Some(cancel.clone());
+        self.downloading = Some((id, cancel.clone()));
         let ui = self.ui.clone();
         let done = self.internal_tx.clone();
         thread::Builder::new()
@@ -919,12 +1029,18 @@ impl Controller {
     fn on_internal(&mut self, ev: Internal) {
         match ev {
             Internal::DownloadFinished { id, error } => {
-                self.download_cancel = None;
+                self.downloading = None;
                 if error.is_none() && id == self.cfg.model.id {
                     let m = &self.cfg.model;
                     self.engine.select(&m.id, m.threads, m.unload_after_mins);
                 }
+                if error.is_none() && id == models::POLISH.id {
+                    self.polisher.recheck();
+                }
                 self.emit(Event::DownloadFinished { id, error });
+                if let Some(next) = self.download_queue.pop_front() {
+                    self.download(next);
+                }
             }
             Internal::PermissionsFixed(Ok(())) => {
                 self.refresh_permissions();
@@ -1034,6 +1150,11 @@ impl Controller {
     }
 }
 
+/// Whether anything reads the focused app or field.
+fn reads_focus(c: &Config) -> bool {
+    c.insertion.smart_spacing || c.insertion.split_for_agents || c.text.polish
+}
+
 fn spawn_inserter(
     ui: EventSender,
     hotkeys: &Hotkeys,
@@ -1046,16 +1167,15 @@ fn spawn_inserter(
         .name("bars-insert".into())
         .spawn(move || {
             let mut injector = Injector::new();
-            // What had focus when the current dictation started.
-            let mut started_in: Option<Receiver<Focus>> = None;
             for job in rx {
                 match job {
-                    InsertJob::Text { text, cfg, names, fresh, watch } => {
+                    InsertJob::Text { text, cfg, names, field, watch } => {
                         let wants = cfg.smart_spacing || cfg.split_for_agents;
-                        let focus = if fresh {
-                            wants.then(|| focus::capture(cfg.smart_spacing.then_some(focus::CONTEXT_CHARS), FOCUS_TIMEOUT))
-                        } else {
-                            started_in.take().and_then(|rx| rx.recv_timeout(FOCUS_TIMEOUT).ok())
+                        let focus = match field {
+                            Field::Now => wants
+                                .then(|| focus::capture(cfg.smart_spacing.then_some(focus::CONTEXT_CHARS), FOCUS_TIMEOUT)),
+                            Field::Reading(rx) => rx.and_then(|rx| rx.recv_timeout(FOCUS_TIMEOUT).ok()),
+                            Field::Read(focus) => focus,
                         };
                         let focus = focus.unwrap_or_default();
                         let inserted =
@@ -1072,10 +1192,7 @@ fn spawn_inserter(
                             thread::spawn(move || watch.run(generation, &gen_now, &internal));
                         }
                     }
-                    InsertJob::RememberTarget { read_focus, read_field } => {
-                        injector.remember_target();
-                        started_in = read_focus.then(|| focus::start_capture(read_field.then_some(focus::CONTEXT_CHARS)));
-                    }
+                    InsertJob::RememberTarget => injector.remember_target(),
                     InsertJob::Copy(text) => {
                         if let Err(e) = injector.copy(&text) {
                             let _ = ui.try_send(Event::Notice {
