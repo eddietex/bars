@@ -36,6 +36,16 @@
     <internet>first-run</internet>
   </requires>
   <releases>
+    <release version="0.5.0" date="2026-10-15">
+      <description>
+        <ul>
+          <li>More than one shortcut: Add shortcut in Shortcut &amp; input records another, and they all start dictation the same way. At least one always stays.</li>
+          <li>A shortcut can be a mouse button: the middle button or a side or extra button (Mouse 3, Mouse 4, Mouse 5...), on its own or with modifiers. Left and right click can't be shortcuts, and clicking never gets in the way of one.</li>
+          <li>On macOS and Windows a mouse-button shortcut does nothing else in the app. On Linux it also reaches the app, and Bars asks once more for access to mice.</li>
+          <li>Home shows every shortcut.</li>
+        </ul>
+      </description>
+    </release>
     <release version="0.4.0" date="2026-10-14">
       <description>
         <ul>
