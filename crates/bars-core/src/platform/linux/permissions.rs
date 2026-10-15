@@ -1,6 +1,7 @@
 //! One-time device access setup.
 //!
-//! The direct hotkey backend reads keyboards and the injector writes to
+//! The direct hotkey backend reads keyboards (and mice, for mouse-button
+//! shortcuts) and the injector writes to
 //! `/dev/uinput`. Rather than adding the user to the `input` group (which on
 //! image-based distros means editing /etc/group), we install a udev rule
 //! that tags these devices `uaccess`: systemd-logind then grants access to
@@ -10,10 +11,12 @@ use std::process::Command;
 
 pub const RULE_PATH: &str = "/etc/udev/rules.d/70-bars.rules";
 
-pub const RULE: &str = r#"# Bars voice dictation: let the active seat user observe keyboards (global
-# push-to-talk hotkey) and create a virtual keyboard (to type transcripts).
+pub const RULE: &str = r#"# Bars voice dictation: let the active seat user observe keyboards and mice
+# (global push-to-talk shortcut, which can be a mouse button) and create a
+# virtual keyboard (to type transcripts).
 KERNEL=="uinput", SUBSYSTEM=="misc", TAG+="uaccess", OPTIONS+="static_node=uinput"
 SUBSYSTEM=="input", KERNEL=="event*", ENV{ID_INPUT_KEYBOARD}=="1", TAG+="uaccess"
+SUBSYSTEM=="input", KERNEL=="event*", ENV{ID_INPUT_MOUSE}=="1", TAG+="uaccess"
 "#;
 
 /// Shell snippet that installs the rule and applies it immediately.

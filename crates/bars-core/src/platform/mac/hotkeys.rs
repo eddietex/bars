@@ -1,10 +1,11 @@
-//! Global shortcut via a Quartz event tap. With Accessibility the tap can
-//! drop events: Escape while recording (it cancels the dictation instead
-//! of also closing a dialog in the app), the key that finishes the
-//! shortcut, keys pressed while a new shortcut is being recorded, and
-//! Fn/Globe when Fn alone is the shortcut (so macOS doesn't also open the
-//! emoji picker or switch input source). With only Input Monitoring it
-//! falls back to listening.
+//! Global shortcut via a Quartz event tap, on keys and on the mouse's
+//! middle and side buttons (never left and right clicks). With
+//! Accessibility the tap can drop events: Escape while recording (it
+//! cancels the dictation instead of also closing a dialog in the app), the
+//! key or button that finishes a shortcut, keys and buttons pressed while a
+//! new shortcut is being recorded, and Fn/Globe when Fn alone is a shortcut
+//! (so macOS doesn't also open the emoji picker or switch input source).
+//! With only Input Monitoring it falls back to listening.
 
 use std::cell::RefCell;
 use std::ffi::c_void;
@@ -22,16 +23,17 @@ use core_graphics::event::{
 use crossbeam_channel::Sender;
 use parking_lot::Mutex;
 
-use super::keycodes::{KVK_GLOBE, MODIFIERS, MacKeys};
+use super::keycodes::{KVK_GLOBE, MODIFIERS, MOUSE_BASE, MacKeys};
 use crate::hotkey::{
-    Chord, ChordTracker, FilterInput, HeldKeys, HotkeyEvent, KeyChange, KeyFilter, KeyMap, Mods, STALE_KEY_AGE,
-    STALE_KEY_SWEEP,
+    self, Chord, ChordTracker, FilterInput, HeldKeys, HotkeyEvent, KeyChange, KeyFilter, KeyMap, Mods,
+    STALE_KEY_AGE, STALE_KEY_SWEEP,
 };
 
 #[link(name = "CoreGraphics", kind = "framework")]
 unsafe extern "C" {
     fn CGEventTapEnable(tap: CFMachPortRef, enable: bool);
     fn CGEventSourceKeyState(state: i32, key: u16) -> bool;
+    fn CGEventSourceButtonState(state: i32, button: u32) -> bool;
     fn CGEventSourceFlagsState(state: i32) -> u64;
 }
 
@@ -49,7 +51,7 @@ pub const SYNTHETIC_MARKER: i64 = enigo::EVENT_MARKER as i64;
 
 #[derive(Default)]
 struct Shared {
-    chord: Option<Chord>,
+    chords: Vec<Chord>,
     capturing: bool,
     recording: bool,
 }
@@ -88,14 +90,14 @@ pub struct MacHotkeys {
 }
 
 impl MacHotkeys {
-    pub fn spawn(chord: Chord, events: Sender<HotkeyEvent>) -> anyhow::Result<Self> {
+    pub fn spawn(chords: Vec<Chord>, events: Sender<HotkeyEvent>) -> anyhow::Result<Self> {
         // Checked first: creating a tap without access pops a system prompt
         // before the setup assistant has explained anything.
         if !super::permissions::accessibility() && !super::permissions::input_monitoring() {
             anyhow::bail!("Accessibility permission is needed");
         }
         let shared = Arc::new(Mutex::new(Shared {
-            chord: Some(chord),
+            chords,
             ..Default::default()
         }));
         let (ready_tx, ready_rx) = crossbeam_channel::bounded::<Result<(), String>>(1);
@@ -119,7 +121,15 @@ impl MacHotkeys {
                         CGEventTapLocation::Session,
                         CGEventTapPlacement::HeadInsertEventTap,
                         options,
-                        vec![CGEventType::KeyDown, CGEventType::KeyUp, CGEventType::FlagsChanged],
+                        vec![
+                            CGEventType::KeyDown,
+                            CGEventType::KeyUp,
+                            CGEventType::FlagsChanged,
+                            // Middle and side buttons; left and right clicks
+                            // never reach the tap.
+                            CGEventType::OtherMouseDown,
+                            CGEventType::OtherMouseUp,
+                        ],
                         move |_proxy, etype, event| t.on_event(etype, event),
                     )
                 };
@@ -163,8 +173,8 @@ impl MacHotkeys {
         Ok(MacHotkeys { shared })
     }
 
-    pub fn set_chord(&self, chord: Chord) {
-        self.shared.lock().chord = Some(chord);
+    pub fn set_chords(&self, chords: Vec<Chord>) {
+        self.shared.lock().chords = chords;
     }
 
     pub fn set_capture(&self, on: bool) {
@@ -210,21 +220,36 @@ impl Tap {
         if event.get_integer_value_field(EventField::EVENT_SOURCE_USER_DATA) == SYNTHETIC_MARKER {
             return CallbackResult::Keep;
         }
-        let code = event.get_integer_value_field(EventField::KEYBOARD_EVENT_KEYCODE) as u32;
-        let (chord, capturing, recording) = {
+        let (chords, capturing, recording) = {
             let sh = self.shared.lock();
-            (sh.chord.clone(), sh.capturing, sh.recording)
+            (sh.chords.clone(), sh.capturing, sh.recording)
         };
         let active = self.active.load(Ordering::Acquire);
+        let mouse = matches!(etype, CGEventType::OtherMouseDown | CGEventType::OtherMouseUp);
+        let code = if mouse {
+            MOUSE_BASE + event.get_integer_value_field(EventField::MOUSE_EVENT_BUTTON_NUMBER) as u32
+        } else {
+            event.get_integer_value_field(EventField::KEYBOARD_EVENT_KEYCODE) as u32
+        };
         // Newer keyboards send the Globe key as a key of its own, next to
         // Fn's flag change.
-        if code == KVK_GLOBE {
-            let drop = active && chord.as_ref().is_some_and(Chord::is_fn_only);
+        if !mouse && code == KVK_GLOBE {
+            let drop = active && chords.iter().any(Chord::is_fn_only);
             return if drop { CallbackResult::Drop } else { CallbackResult::Keep };
         }
         let flags = event.get_flags();
         let mut st = self.state.lock();
+        // A button no shortcut uses passes untouched (unless its press was
+        // dropped, before the shortcuts changed).
+        if mouse && !hotkey::counts(&MacKeys, code, &chords, capturing) && !st.held.contains(code) {
+            return CallbackResult::Keep;
+        }
         let (change, newly) = match etype {
+            CGEventType::OtherMouseDown => (KeyChange::Press, st.held.press(code).then_some(code)),
+            CGEventType::OtherMouseUp => {
+                st.held.release(code);
+                (KeyChange::Release, None)
+            }
             CGEventType::KeyDown if event.get_integer_value_field(EventField::KEYBOARD_EVENT_AUTOREPEAT) != 0 => {
                 (KeyChange::Repeat, None)
             }
@@ -258,9 +283,9 @@ impl Tap {
             let TapState { held, filter, .. } = &mut *st;
             held.drop_stale(STALE_KEY_AGE, |k| filter.is_dropped(k) || key_is_down(k));
         }
-        let completed = change != KeyChange::Repeat && self.track(&mut st, newly, chord.as_ref(), capturing);
+        let completed = change != KeyChange::Repeat && self.track(&mut st, newly, &chords, capturing);
         let input = FilterInput {
-            chord: chord.as_ref(),
+            chords: &chords,
             completed_chord: completed,
             recording,
             capturing,
@@ -272,18 +297,17 @@ impl Tap {
         }
     }
 
-    /// Runs the tracker; returns whether this press completed the shortcut.
-    fn track(&self, st: &mut TapState, newly: Option<u32>, chord: Option<&Chord>, capturing: bool) -> bool {
+    /// Runs the tracker; returns whether this press completed a shortcut.
+    fn track(&self, st: &mut TapState, newly: Option<u32>, chords: &[Chord], capturing: bool) -> bool {
         let TapState { held, tracker, .. } = st;
-        let (events, _mods) = tracker.update(&MacKeys, &held.keys, newly, chord, capturing);
-        if events.iter().any(|e| matches!(e, HotkeyEvent::Captured(_))) {
+        let tracked = tracker.update(&MacKeys, &held.keys, newly, chords, capturing);
+        if tracked.events.iter().any(|e| matches!(e, HotkeyEvent::Captured(_))) {
             self.shared.lock().capturing = false;
         }
-        let completed = events.contains(&HotkeyEvent::Down);
-        for ev in events {
+        for ev in tracked.events {
             let _ = self.events.send(ev);
         }
-        completed
+        tracked.completed
     }
 
     /// Every few seconds: forget keys the keyboard says are up, so a
@@ -295,17 +319,20 @@ impl Tap {
             return;
         }
         log::debug!("hotkeys: dropped keys macOS reports as released");
-        let (chord, capturing) = {
+        let (chords, capturing) = {
             let sh = self.shared.lock();
-            (sh.chord.clone(), sh.capturing)
+            (sh.chords.clone(), sh.capturing)
         };
-        self.track(&mut st, None, chord.as_ref(), capturing);
+        self.track(&mut st, None, &chords, capturing);
     }
 }
 
-/// Whether the keyboard reports `code` as held. Modifiers by their flag:
-/// Fn's has no reliable per-key state.
+/// Whether the keyboard (or mouse) reports `code` as held. Modifiers by
+/// their flag: Fn's has no reliable per-key state.
 fn key_is_down(code: u32) -> bool {
+    if let Some(button) = MacKeys.mouse_button(code) {
+        return unsafe { CGEventSourceButtonState(HID_STATE, button as u32 - 1) };
+    }
     match MacKeys.modifier_of(code) {
         Some(m) => CGEventFlags::from_bits_retain(unsafe { CGEventSourceFlagsState(HID_STATE) }).contains(flag_for(m)),
         None => unsafe { CGEventSourceKeyState(HID_STATE, code as u16) },

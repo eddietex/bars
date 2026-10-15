@@ -41,7 +41,11 @@ impl Default for Config {
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct HotkeyConfig {
-    pub chord: Chord,
+    /// Every shortcut that starts dictation (keys or mouse buttons). Older
+    /// configs have the one `chord`.
+    #[serde(alias = "chord", deserialize_with = "one_or_more")]
+    pub chords: Vec<Chord>,
+    /// How all of them work.
     pub activation: Activation,
     pub backend: HotkeyBackendKind,
 }
@@ -49,11 +53,56 @@ pub struct HotkeyConfig {
 impl Default for HotkeyConfig {
     fn default() -> Self {
         HotkeyConfig {
-            chord: Chord::default(),
+            chords: vec![Chord::default()],
             activation: Activation::default(),
             backend: HotkeyBackendKind::Auto,
         }
     }
+}
+
+impl HotkeyConfig {
+    /// The shortcut to show when there's room for one.
+    pub fn first(&self) -> Option<&Chord> {
+        self.chords.first()
+    }
+
+    /// There is always at least one shortcut that can work: ones that
+    /// can't (a config edited by hand) and repeats are dropped, and with
+    /// none left the default comes back.
+    pub fn keep_a_shortcut(&mut self) {
+        let mut kept: Vec<Chord> = Vec::new();
+        for chord in std::mem::take(&mut self.chords) {
+            match chord.is_valid() {
+                Err(e) => log::warn!("ignoring shortcut {chord}: {e}"),
+                Ok(()) if !kept.contains(&chord) => kept.push(chord),
+                Ok(()) => {}
+            }
+        }
+        if kept.is_empty() {
+            log::warn!("no usable shortcut; using {}", Chord::default());
+            kept.push(Chord::default());
+        }
+        self.chords = kept;
+    }
+}
+
+/// A list of shortcuts, or (older configs) a single one; never none.
+fn one_or_more<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Vec<Chord>, D::Error> {
+    #[derive(Deserialize)]
+    #[serde(untagged)]
+    enum OneOrMore {
+        One(Chord),
+        More(Vec<Chord>),
+    }
+    let mut hotkey = HotkeyConfig {
+        chords: match OneOrMore::deserialize(d)? {
+            OneOrMore::One(c) => vec![c],
+            OneOrMore::More(v) => v,
+        },
+        ..Default::default()
+    };
+    hotkey.keep_a_shortcut();
+    Ok(hotkey.chords)
 }
 
 #[derive(Copy, Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -324,13 +373,37 @@ mod tests {
         let s = toml::to_string_pretty(&cfg).unwrap();
         let back: Config = toml::from_str(&s).unwrap();
         assert_eq!(back, cfg);
-        assert!(s.contains("chord = \"Ctrl+Super\""));
+        assert!(s.contains(&format!("chords = [\"{}\"]", Chord::default())));
+    }
+
+    #[test]
+    fn several_shortcuts_and_mouse_buttons_roundtrip() {
+        let cfg: Config = toml::from_str("[hotkey]\nchords = [\"Ctrl+Option\", \"Mouse4\"]\n").unwrap();
+        assert_eq!(cfg.hotkey.chords.len(), 2);
+        assert_eq!(cfg.hotkey.chords[1].mouse_button(), Some(4));
+        let back: Config = toml::from_str(&toml::to_string_pretty(&cfg).unwrap()).unwrap();
+        assert_eq!(back.hotkey, cfg.hotkey);
+    }
+
+    #[test]
+    fn always_keeps_a_shortcut() {
+        let chords = |toml: &str| toml::from_str::<Config>(&format!("[hotkey]\n{toml}\n")).unwrap().hotkey.chords;
+        assert_eq!(chords("chords = []"), vec![Chord::default()]);
+        // Ones that can't work (left click, a lone modifier) don't count.
+        assert_eq!(chords("chords = [\"Mouse1\", \"Ctrl\"]"), vec![Chord::default()]);
+        assert_eq!(
+            chords("chords = [\"Ctrl+Shift+K\", \"Mouse1\", \"Ctrl+Shift+K\"]"),
+            vec!["Ctrl+Shift+K".parse::<Chord>().unwrap()]
+        );
+        let mut cfg = HotkeyConfig { chords: Vec::new(), ..Default::default() };
+        cfg.keep_a_shortcut();
+        assert_eq!(cfg.chords, vec![Chord::default()]);
     }
 
     #[test]
     fn partial_file_fills_defaults() {
         let cfg: Config = toml::from_str("[hotkey]\nchord = \"Alt+Space\"\n").unwrap();
-        assert_eq!(cfg.hotkey.chord.to_string(), "Alt+Space");
+        assert_eq!(cfg.hotkey.chords, vec!["Alt+Space".parse::<Chord>().unwrap()]);
         assert_eq!(cfg.audio, AudioConfig::default());
     }
 }

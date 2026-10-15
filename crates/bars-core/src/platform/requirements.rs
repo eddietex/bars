@@ -58,6 +58,8 @@ pub struct Context {
     pub hotkey_backend: &'static str,
     /// The user chose the portal alternative on purpose.
     pub prefers_portal: bool,
+    /// A shortcut is a mouse button (Linux: mice must be readable too).
+    pub uses_mouse: bool,
 }
 
 pub fn check(ctx: &Context) -> Vec<Requirement> {
@@ -121,9 +123,13 @@ fn microphone() -> Requirement {
 fn linux_keyboard(ctx: &Context) -> Requirement {
     use super::linux;
     // BARS_DEV_NO_ACCESS=1 previews the onboarding as a new user sees it.
+    // A mouse-button shortcut needs the mice readable too (the rule from
+    // before mouse shortcuts only covers keyboards).
+    let mice_blocked = ctx.uses_mouse && linux::evdev_hotkeys::mouse_access() == Some(false);
     let direct = std::env::var_os("BARS_DEV_NO_ACCESS").is_none()
         && linux::evdev_hotkeys::can_read_keyboards()
-        && linux::permissions::can_open_uinput();
+        && linux::permissions::can_open_uinput()
+        && !mice_blocked;
     let using_portal = ctx.hotkey_backend == "desktop";
     let status = if direct || (using_portal && ctx.prefers_portal) {
         ReqStatus::Granted
@@ -142,8 +148,13 @@ fn linux_keyboard(ctx: &Context) -> Requirement {
     });
     Requirement {
         id: ReqId::KeyboardAccess,
-        title: "Keyboard access".into(),
-        why: "Lets Bars notice your shortcut in every app and type the result, like a keyboard. Installs a small system rule that applies only to you while you're logged in.".into(),
+        title: if ctx.uses_mouse { "Keyboard and mouse access" } else { "Keyboard access" }.into(),
+        why: if mice_blocked {
+            "Your shortcut is a mouse button, which Bars can't see yet. Allowing access again updates the small system rule to cover mice."
+        } else {
+            "Lets Bars notice your shortcut in every app and type the result, like a keyboard. Installs a small system rule that applies only to you while you're logged in."
+        }
+        .into(),
         status,
         granted_note: Some(if direct {
             "Direct access: any shortcut, including Ctrl + Super".into()

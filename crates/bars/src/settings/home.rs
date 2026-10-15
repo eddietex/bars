@@ -16,6 +16,8 @@ impl SettingsView {
         let p = cx.palette();
         let st = self.state.read(cx);
         let chord_parts = st.shortcut_parts();
+        // The others, small, under the first.
+        let more: Vec<Vec<String>> = st.shortcuts().into_iter().skip(1).take(3).collect();
         let activation = st.config.hotkey.activation;
         let stats = st.stats.clone();
         let recent: Vec<Entry> = st.history.iter().rev().take(6).cloned().collect();
@@ -54,6 +56,14 @@ impl SettingsView {
                             .into_any_element(),
                     })
                     .child(keycaps(chord_parts, p, true))
+                    .when(!more.is_empty(), |el| {
+                        el.child(h_row().gap(px(8.)).flex_wrap().justify_center().children(more.into_iter().map(|parts| {
+                            h_row()
+                                .gap(px(8.))
+                                .child(div().text_size(px(12.5)).text_color(p.text_muted).child("or"))
+                                .child(keycaps(parts, p, false))
+                        })))
+                    })
                     .child(div().text_size(px(13.5)).text_color(p.text_muted).child(how)),
             )
             .child(

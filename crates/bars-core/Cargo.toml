@@ -44,7 +44,7 @@ ashpd = { version = "0.13", default-features = false, features = ["async-io", "g
 async-io = "2"
 futures-util = { version = "0.3", default-features = false, features = ["std"] }
 zbus = { version = "5", default-features = false, features = ["async-io", "blocking-api"] }
-nix = { version = "0.30", features = ["fs", "poll"] }
+nix = { version = "0.30", features = ["fs", "ioctl", "poll"] }
 wayland-client = "0.31"
 wayland-protocols = { version = "0.32", features = ["client", "staging"] }
 wayland-protocols-wlr = { version = "0.3", features = ["client"] }

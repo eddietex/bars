@@ -23,7 +23,11 @@ Spokenly Cleanup 1 on llama.cpp.
 
 The shortcut, activation style (hold + double-tap / hold / toggle), microphone,
 insertion method, model and more are in the settings window (click the tray
-icon). Say **"new line"** or **"new paragraph"** to break lines; filler words
+icon). You can add more than one shortcut, all working the same way, and a
+shortcut can be a mouse button: the middle button or a side button, on its
+own or with modifiers (never left or right click). On macOS and Windows the
+button then does nothing else; on Linux it also reaches the app, so pick one
+the app doesn't use. Say **"new line"** or **"new paragraph"** to break lines; filler words
 ("um", "uh") are removed; the Dictionary page holds word replacements and
 spoken snippets.
 
@@ -100,13 +104,13 @@ Bars picks the best available backend and falls back automatically:
 
 | Need | Preferred | Fallback (no setup) |
 | --- | --- | --- |
-| Global shortcut | **evdev**: reads keyboards; any chord, including modifier-only `Ctrl+Super` | **GlobalShortcuts portal**: desktop owns the binding (KDE, GNOME 48+, Hyprland) |
+| Global shortcut | **evdev**: reads keyboards (and mice, for a mouse-button shortcut); any chord, including modifier-only `Ctrl+Super` | **GlobalShortcuts portal**: desktop owns the binding, keys only (KDE, GNOME 48+, Hyprland) |
 | Insert text | **uinput** virtual keyboard: paste or layout-aware typing | **RemoteDesktop portal**: asks once, remembered |
 | Clipboard paste | Wayland data-control, with the old clipboard restored | Type key by key |
 | Recording pill | **layer-shell** overlay that never takes focus | Unfocused popup window |
 
-The preferred backends need read access to keyboards and write access to
-`/dev/uinput`. Bars requests this with a small udev rule that grants it to
+The preferred backends need read access to keyboards (and mice) and write
+access to `/dev/uinput`. Bars requests this with a small udev rule that grants it to
 the user logged in at the seat (systemd `uaccess`), with no group changes and
 no reboot. The **setup assistant** opens on first launch and walks through
 the microphone, this permission (one click: "Allow access" shows the
@@ -120,7 +124,9 @@ pkexec ./scripts/install-udev-rule.sh
 ```
 
 Note: like membership in the `input` group, this lets programs running as you
-read keyboard events.
+read keyboard and mouse events. Mice were added to the rule for mouse-button
+shortcuts; with an older rule, setup asks once more when a shortcut is a
+mouse button.
 
 The default paste shortcut is **Shift+Insert**, with the text placed on both the
 clipboard and the primary selection, so it works in GUI apps and terminals
@@ -139,6 +145,7 @@ cargo test -p bars-core                 # core unit tests
 cargo run --release -p bars-core --example bench -- testdata/jfk.wav   # model speed
 cargo run --release -p bars-core --example polish -- "um so i think we should uh ship it"   # polish
 cargo run -p bars-core --example headless   # controller without UI
+cargo run -p bars-core --example shortcuts -- Ctrl+Super Mouse4   # what the shortcut listener sees
 ```
 
 ### Flatpak (recommended distribution)

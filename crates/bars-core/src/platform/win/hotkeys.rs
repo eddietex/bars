@@ -1,8 +1,11 @@
-//! Global shortcut via a low-level keyboard hook (WH_KEYBOARD_LL). Keys are
-//! observed, and a few swallowed: Escape while recording (it cancels the
-//! dictation instead of also reaching the app), the key that finishes the
-//! shortcut, and keys pressed while a new shortcut is being recorded.
-//! Modifiers always pass, so none can get stuck. No permission is needed.
+//! Global shortcut via a low-level keyboard hook (WH_KEYBOARD_LL), and a
+//! low-level mouse hook (WH_MOUSE_LL) while a shortcut is a mouse button or
+//! one is being recorded. Keys and buttons are observed, and a few
+//! swallowed: Escape while recording (it cancels the dictation instead of
+//! also reaching the app), the key or button that finishes a shortcut, and
+//! keys and buttons pressed while a new shortcut is being recorded.
+//! Modifiers, and left and right clicks, always pass. No permission is
+//! needed.
 
 use std::cell::RefCell;
 use std::sync::Arc;
@@ -15,19 +18,27 @@ use windows::Win32::UI::Input::KeyboardAndMouse::{
     GetAsyncKeyState, INPUT, INPUT_0, INPUT_KEYBOARD, KEYBD_EVENT_FLAGS, KEYBDINPUT, KEYEVENTF_KEYUP, SendInput,
     VIRTUAL_KEY,
 };
+use windows::Win32::System::Threading::GetCurrentThreadId;
 use windows::Win32::UI::WindowsAndMessaging::{
-    CallNextHookEx, DispatchMessageW, GetMessageW, HHOOK, KBDLLHOOKSTRUCT, LLKHF_INJECTED, MSG, SetTimer,
-    SetWindowsHookExW, TranslateMessage, WH_KEYBOARD_LL, WM_KEYDOWN, WM_KEYUP, WM_SYSKEYDOWN, WM_SYSKEYUP, WM_TIMER,
+    CallNextHookEx, DispatchMessageW, GetMessageW, HHOOK, KBDLLHOOKSTRUCT, LLKHF_INJECTED, LLMHF_INJECTED, MSG,
+    MSLLHOOKSTRUCT, PostThreadMessageW, SetTimer, SetWindowsHookExW, TranslateMessage, UnhookWindowsHookEx, WH_KEYBOARD_LL,
+    WH_MOUSE_LL, WM_APP, WM_KEYDOWN, WM_KEYUP, WM_MBUTTONDOWN, WM_MBUTTONUP, WM_SYSKEYDOWN, WM_SYSKEYUP, WM_TIMER,
+    WM_XBUTTONDOWN, WM_XBUTTONUP, XBUTTON1,
 };
 
-use super::keycodes::{VK_UNASSIGNED, WinKeys};
+use super::keycodes::{VK_MBUTTON, VK_UNASSIGNED, VK_XBUTTON1, VK_XBUTTON2, WinKeys};
 use crate::hotkey::{
-    Chord, ChordTracker, FilterInput, HeldKeys, HotkeyEvent, KeyChange, KeyFilter, Mods, STALE_KEY_AGE, STALE_KEY_SWEEP,
+    self, Chord, ChordTracker, FilterInput, HeldKeys, HotkeyEvent, KeyChange, KeyFilter, Mods, STALE_KEY_AGE,
+    STALE_KEY_SWEEP,
 };
+
+/// Asks the hook thread to install or remove the mouse hook to match
+/// what's wanted.
+const WM_SYNC_MOUSE: u32 = WM_APP + 1;
 
 #[derive(Default)]
 struct Shared {
-    chord: Option<Chord>,
+    chords: Vec<Chord>,
     capturing: bool,
     recording: bool,
 }
@@ -41,21 +52,25 @@ struct HookState {
 }
 
 thread_local! {
-    // The hook procedure runs on the thread that installed it.
+    // The hook procedures run on the thread that installed them.
     static STATE: RefCell<Option<HookState>> = const { RefCell::new(None) };
+    /// The mouse hook, while it's installed.
+    static MOUSE_HOOK: RefCell<Option<HHOOK>> = const { RefCell::new(None) };
 }
 
 pub struct WinHotkeys {
     shared: Arc<Mutex<Shared>>,
+    /// The hook thread, which installs and removes the mouse hook.
+    thread: u32,
 }
 
 impl WinHotkeys {
-    pub fn spawn(chord: Chord, events: Sender<HotkeyEvent>) -> anyhow::Result<Self> {
+    pub fn spawn(chords: Vec<Chord>, events: Sender<HotkeyEvent>) -> anyhow::Result<Self> {
         let shared = Arc::new(Mutex::new(Shared {
-            chord: Some(chord),
+            chords,
             ..Default::default()
         }));
-        let (ready_tx, ready_rx) = crossbeam_channel::bounded::<Result<(), String>>(1);
+        let (ready_tx, ready_rx) = crossbeam_channel::bounded::<Result<u32, String>>(1);
         let s = shared.clone();
         thread::Builder::new()
             .name("bars-hotkeys".into())
@@ -76,8 +91,9 @@ impl WinHotkeys {
                         return;
                     }
                 };
-                let _ = ready_tx.send(Ok(()));
+                let _ = ready_tx.send(Ok(unsafe { GetCurrentThreadId() }));
                 let _ = hook;
+                sync_mouse_hook();
                 // Checks for keys whose release was missed.
                 unsafe { SetTimer(None, 0, STALE_KEY_SWEEP.as_millis() as u32, None) };
                 // Low-level hooks are delivered through this thread's queue.
@@ -88,24 +104,36 @@ impl WinHotkeys {
                             sweep();
                             continue;
                         }
+                        if msg.message == WM_SYNC_MOUSE {
+                            sync_mouse_hook();
+                            continue;
+                        }
                         let _ = TranslateMessage(&msg);
                         DispatchMessageW(&msg);
                     }
                 }
             })?;
-        ready_rx
+        let thread = ready_rx
             .recv()
             .map_err(|_| anyhow::anyhow!("hotkey thread exited"))?
             .map_err(|e| anyhow::anyhow!(e))?;
-        Ok(WinHotkeys { shared })
+        Ok(WinHotkeys { shared, thread })
     }
 
-    pub fn set_chord(&self, chord: Chord) {
-        self.shared.lock().chord = Some(chord);
+    pub fn set_chords(&self, chords: Vec<Chord>) {
+        self.shared.lock().chords = chords;
+        self.sync_mouse();
     }
 
     pub fn set_capture(&self, on: bool) {
         self.shared.lock().capturing = on;
+        self.sync_mouse();
+    }
+
+    /// The mouse hook sees every move of the mouse, so it's only there
+    /// while a shortcut is a mouse button (or one is being recorded).
+    fn sync_mouse(&self) {
+        let _ = unsafe { PostThreadMessageW(self.thread, WM_SYNC_MOUSE, WPARAM(0), LPARAM(0)) };
     }
 
     pub fn set_recording(&self, on: bool) {
@@ -149,11 +177,64 @@ unsafe extern "system" fn hook_proc(code: i32, wparam: WPARAM, lparam: LPARAM) -
     unsafe { CallNextHookEx(None, code, wparam, lparam) }
 }
 
-/// Returns whether to swallow the key.
+unsafe extern "system" fn mouse_proc(code: i32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
+    if code >= 0 {
+        let msg = wparam.0 as u32;
+        // Moves and clicks pass at once; only middle and side buttons count.
+        let down = matches!(msg, WM_MBUTTONDOWN | WM_XBUTTONDOWN);
+        if down || matches!(msg, WM_MBUTTONUP | WM_XBUTTONUP) {
+            let ms = unsafe { &*(lparam.0 as *const MSLLHOOKSTRUCT) };
+            let vk = match msg {
+                WM_MBUTTONDOWN | WM_MBUTTONUP => VK_MBUTTON,
+                _ if (ms.mouseData >> 16) as u16 == XBUTTON1 => VK_XBUTTON1,
+                _ => VK_XBUTTON2,
+            };
+            if (ms.flags & LLMHF_INJECTED) == 0 && on_key(vk, down) {
+                return LRESULT(1);
+            }
+        }
+    }
+    unsafe { CallNextHookEx(None, code, wparam, lparam) }
+}
+
+/// Installs or removes the mouse hook (on the hook thread).
+fn sync_mouse_hook() {
+    let wanted = STATE.with(|st| {
+        st.borrow().as_ref().is_some_and(|s| {
+            let sh = s.shared.lock();
+            hotkey::wants_mouse(&sh.chords, sh.capturing)
+        })
+    });
+    MOUSE_HOOK.with(|h| {
+        let mut hook = h.borrow_mut();
+        match (wanted, *hook) {
+            (true, None) => match unsafe { SetWindowsHookExW(WH_MOUSE_LL, Some(mouse_proc), None, 0) } {
+                Ok(new) => *hook = Some(new),
+                Err(e) => log::warn!("mouse hook: {e}"),
+            },
+            (false, Some(old)) => {
+                let _ = unsafe { UnhookWindowsHookEx(old) };
+                *hook = None;
+            }
+            _ => {}
+        }
+    });
+}
+
+/// Returns whether to swallow the key (or mouse button).
 fn on_key(vk: u32, down: bool) -> bool {
     STATE.with(|st| {
         let mut guard = st.borrow_mut();
         let Some(state) = guard.as_mut() else { return false };
+        let (chords, capturing, recording) = {
+            let s = state.shared.lock();
+            (s.chords.clone(), s.capturing, s.recording)
+        };
+        // A button no shortcut uses passes untouched (unless its press was
+        // swallowed, before the shortcuts changed).
+        if !hotkey::counts(&WinKeys, vk, &chords, capturing) && !state.held.contains(vk) {
+            return false;
+        }
         // Autorepeat sends repeated key-downs; only the first counts.
         let change = if !down {
             state.held.release(vk);
@@ -163,10 +244,6 @@ fn on_key(vk: u32, down: bool) -> bool {
         } else {
             KeyChange::Repeat
         };
-        let (chord, capturing, recording) = {
-            let s = state.shared.lock();
-            (s.chord.clone(), s.capturing, s.recording)
-        };
         let completed = match change {
             KeyChange::Repeat => false,
             KeyChange::Press => {
@@ -175,12 +252,12 @@ fn on_key(vk: u32, down: bool) -> bool {
                 // desktop of a UAC prompt).
                 let HookState { held, filter, .. } = &mut *state;
                 held.drop_stale(STALE_KEY_AGE, |k| filter.is_dropped(k) || key_is_down(k));
-                state.track(Some(vk), chord.as_ref(), capturing)
+                state.track(Some(vk), &chords, capturing)
             }
-            KeyChange::Release => state.track(None, chord.as_ref(), capturing),
+            KeyChange::Release => state.track(None, &chords, capturing),
         };
         let input = FilterInput {
-            chord: chord.as_ref(),
+            chords: &chords,
             completed_chord: completed,
             recording,
             capturing,
@@ -199,30 +276,37 @@ fn sweep() {
         if held.drop_stale(STALE_KEY_AGE, |k| filter.is_dropped(k) || key_is_down(k)).is_empty() {
             return;
         }
-        let (chord, capturing) = {
+        let (chords, capturing) = {
             let s = state.shared.lock();
-            (s.chord.clone(), s.capturing)
+            (s.chords.clone(), s.capturing)
         };
-        state.track(None, chord.as_ref(), capturing);
+        state.track(None, &chords, capturing);
     });
 }
 
 impl HookState {
-    /// Runs the tracker; returns whether this press completed the shortcut.
-    fn track(&mut self, newly: Option<u32>, chord: Option<&Chord>, capturing: bool) -> bool {
-        let (events, _mods) = self.tracker.update(&WinKeys, &self.held.keys, newly, chord, capturing);
-        if events.iter().any(|e| matches!(e, HotkeyEvent::Captured(_))) {
+    /// Runs the tracker; returns whether this press completed a shortcut.
+    fn track(&mut self, newly: Option<u32>, chords: &[Chord], capturing: bool) -> bool {
+        let tracked = self.tracker.update(&WinKeys, &self.held.keys, newly, chords, capturing);
+        if tracked.events.iter().any(|e| matches!(e, HotkeyEvent::Captured(_))) {
             self.shared.lock().capturing = false;
+            // Recording ended here, not through `set_capture`.
+            sync_mouse_hook_later();
         }
-        let completed = events.contains(&HotkeyEvent::Down);
-        for ev in events {
-            if ev == HotkeyEvent::Down && chord.is_some_and(|c| c.mods.contains(Mods::SUPER)) {
-                suppress_start_menu();
-            }
+        let started = tracked.completed || tracked.events.contains(&HotkeyEvent::Down);
+        if started && tracked.mods.contains(Mods::SUPER) {
+            suppress_start_menu();
+        }
+        for ev in tracked.events {
             let _ = self.events.send(ev);
         }
-        completed
+        tracked.completed
     }
+}
+
+/// From inside a hook procedure: the mouse hook can't be changed there.
+fn sync_mouse_hook_later() {
+    let _ = unsafe { PostThreadMessageW(GetCurrentThreadId(), WM_SYNC_MOUSE, WPARAM(0), LPARAM(0)) };
 }
 
 /// Releasing the Windows key after using it alone opens the Start menu. A

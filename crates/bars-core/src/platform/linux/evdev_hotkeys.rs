@@ -1,9 +1,10 @@
-//! Global hotkeys by reading keyboards directly (evdev).
+//! Global hotkeys by reading keyboards directly (evdev), and mice while a
+//! shortcut is a mouse button (or one is being recorded).
 //!
 //! Works on every compositor (KDE, GNOME, wlroots, X11) and supports
-//! modifier-only chords such as Ctrl+Super. Keys are observed, so other
-//! apps keep receiving them. Requires read access to `/dev/input/event*`
-//! (see `permissions`).
+//! modifier-only chords such as Ctrl+Super. Keys and buttons are observed,
+//! so other apps keep receiving them (a mouse button shortcut too). Requires
+//! read access to `/dev/input/event*` (see `permissions`).
 //!
 //! The one exception: during a hands-free dictation the keyboards are
 //! held (grabbed) and every key is passed on through a virtual keyboard,
@@ -26,11 +27,13 @@ use parking_lot::Mutex;
 use super::keycodes::{key_from_name, modifier_of, name_from_key};
 use super::VIRTUAL_KEYBOARD_NAME;
 use super::inject::VirtualKeyboard;
-use crate::hotkey::{Chord, ChordTracker, FilterInput, HotkeyEvent, KeyChange, KeyFilter, KeyMap, Mods, STALE_KEY_SWEEP};
+use crate::hotkey::{
+    self, Chord, ChordTracker, FilterInput, HotkeyEvent, Key, KeyChange, KeyFilter, KeyMap, Mods, STALE_KEY_SWEEP,
+};
 
 #[derive(Default)]
 struct Shared {
-    chord: Option<Chord>,
+    chords: Vec<Chord>,
     capturing: bool,
     recording: bool,
     /// A hands-free dictation: the shortcut is up, so keyboards can be held.
@@ -51,14 +54,14 @@ pub struct EvdevHotkeys {
 }
 
 impl EvdevHotkeys {
-    pub fn spawn(chord: Chord, events: Sender<HotkeyEvent>) -> anyhow::Result<Self> {
+    pub fn spawn(chords: Vec<Chord>, events: Sender<HotkeyEvent>) -> anyhow::Result<Self> {
         // Fail fast (so the caller can fall back) if no keyboard is readable.
-        let initial = open_keyboards(&HashMap::new());
+        let initial = open_devices(&HashMap::new(), false);
         if initial.is_empty() {
             anyhow::bail!("no readable keyboards in /dev/input");
         }
         let shared = Arc::new(Mutex::new(Shared {
-            chord: Some(chord),
+            chords,
             ..Default::default()
         }));
         let s = shared.clone();
@@ -68,8 +71,8 @@ impl EvdevHotkeys {
         Ok(EvdevHotkeys { shared })
     }
 
-    pub fn set_chord(&self, chord: Chord) {
-        self.shared.lock().chord = Some(chord);
+    pub fn set_chords(&self, chords: Vec<Chord>) {
+        self.shared.lock().chords = chords;
     }
 
     pub fn set_capture(&self, on: bool) {
@@ -109,7 +112,50 @@ fn is_keyboard(dev: &Device) -> bool {
     })
 }
 
-fn open_keyboards(existing: &HashMap<PathBuf, Device>) -> HashMap<PathBuf, Device> {
+/// Mouse buttons beyond left and right, which shortcuts can use.
+const EXTRA_BUTTONS: [KeyCode; 6] =
+    [KeyCode::BTN_MIDDLE, KeyCode::BTN_SIDE, KeyCode::BTN_EXTRA, KeyCode::BTN_FORWARD, KeyCode::BTN_BACK, KeyCode::BTN_TASK];
+/// Mouse buttons are evdev's codes from BTN_LEFT: button 1 is left.
+const BTN_FIRST: u32 = 0x110;
+const BTN_LAST: u32 = 0x11f;
+
+fn is_mouse(dev: &Device) -> bool {
+    dev.name() != Some(VIRTUAL_KEYBOARD_NAME)
+        && dev.supported_keys().is_some_and(|keys| EXTRA_BUTTONS.iter().any(|b| keys.contains(*b)))
+}
+
+/// Keys and mouse buttons count; a touchpad's touches, a tablet's pen and
+/// joystick buttons don't.
+fn is_tracked(code: KeyCode) -> bool {
+    let c = code.code() as u32;
+    c < 0x100 || (BTN_FIRST..=BTN_LAST).contains(&c) || c >= 0x160
+}
+
+#[repr(C)]
+struct InputMask {
+    kind: u32,
+    codes_size: u32,
+    codes_ptr: u64,
+}
+nix::ioctl_write_ptr!(eviocsmask, b'E', 0x93, InputMask);
+
+/// Asks the kernel not to pass this device's movement on to us: a mouse
+/// would wake Bars hundreds of times a second while it moves, and only its
+/// buttons matter here. Other programs still get everything.
+fn ignore_motion(dev: &Device) {
+    const EV_REL: u32 = 0x02;
+    const EV_ABS: u32 = 0x03;
+    let none = [0u8; 8];
+    for kind in [EV_REL, EV_ABS] {
+        let mask = InputMask { kind, codes_size: none.len() as u32, codes_ptr: none.as_ptr() as u64 };
+        if let Err(e) = unsafe { eviocsmask(dev.as_fd().as_raw_fd(), &mask) } {
+            log::debug!("hotkeys: can't mask movement on {}: {e}", dev.name().unwrap_or("?"));
+        }
+    }
+}
+
+/// Opens readable keyboards not open yet, and with `mice` mice too.
+fn open_devices(existing: &HashMap<PathBuf, Device>, mice: bool) -> HashMap<PathBuf, Device> {
     let mut out = HashMap::new();
     let Ok(dir) = std::fs::read_dir("/dev/input") else {
         return out;
@@ -124,8 +170,9 @@ fn open_keyboards(existing: &HashMap<PathBuf, Device>) -> HashMap<PathBuf, Devic
             continue;
         }
         if let Ok(dev) = Device::open(&path) {
-            if is_keyboard(&dev) && dev.set_nonblocking(true).is_ok() {
+            if (is_keyboard(&dev) || (mice && is_mouse(&dev))) && dev.set_nonblocking(true).is_ok() {
                 log::debug!("hotkeys: watching {} ({})", path.display(), dev.name().unwrap_or("?"));
+                ignore_motion(&dev);
                 out.insert(path, dev);
             }
         }
@@ -141,7 +188,41 @@ fn holdable(dev: &Device) -> bool {
 
 /// Can we read at least one keyboard?
 pub fn can_read_keyboards() -> bool {
-    !open_keyboards(&HashMap::new()).is_empty()
+    !open_devices(&HashMap::new(), false).is_empty()
+}
+
+/// Whether mice can be read, for mouse-button shortcuts: false when a mouse
+/// with buttons beyond left and right is there but can't be opened (an
+/// access rule from before mouse shortcuts), None when there's no such
+/// mouse. What a device has is read from sysfs, which anyone can.
+pub fn mouse_access() -> Option<bool> {
+    let mut unreadable = false;
+    for entry in std::fs::read_dir("/dev/input").ok()?.flatten() {
+        let name = entry.file_name().to_string_lossy().into_owned();
+        if !name.starts_with("event") {
+            continue;
+        }
+        match Device::open(entry.path()) {
+            Ok(dev) if is_mouse(&dev) => return Some(true),
+            Ok(_) => {}
+            Err(e) if e.kind() == std::io::ErrorKind::PermissionDenied => unreadable |= has_extra_buttons(&name),
+            Err(_) => {}
+        }
+    }
+    unreadable.then_some(false)
+}
+
+/// From sysfs: the device has mouse buttons beyond left and right.
+fn has_extra_buttons(event: &str) -> bool {
+    let Ok(caps) = std::fs::read_to_string(format!("/sys/class/input/{event}/device/capabilities/key")) else {
+        return false;
+    };
+    // Hex words, most significant first.
+    let words: Vec<u64> = caps.split_whitespace().rev().filter_map(|w| u64::from_str_radix(w, 16).ok()).collect();
+    EXTRA_BUTTONS.iter().any(|b| {
+        let n = b.code() as usize;
+        words.get(n / 64).is_some_and(|w| ((w >> (n % 64)) & 1) == 1)
+    })
 }
 
 struct EvdevKeys;
@@ -151,13 +232,22 @@ impl KeyMap for EvdevKeys {
         modifier_of(KeyCode::new(code as u16))
     }
     fn name_of(&self, code: u32) -> Option<String> {
+        if let Some(button) = self.mouse_button(code) {
+            return Some(Key::mouse(button).0);
+        }
         name_from_key(KeyCode::new(code as u16))
     }
     fn code_of(&self, name: &str) -> Option<u32> {
+        if let Some(button) = Key(hotkey::canonical_key_name(name)).mouse_button() {
+            return Some(BTN_FIRST + button as u32 - 1).filter(|c| *c <= BTN_LAST);
+        }
         key_from_name(name).map(|k| k.code() as u32)
     }
     fn is_escape(&self, code: u32) -> bool {
         code == KeyCode::KEY_ESC.code() as u32
+    }
+    fn mouse_button(&self, code: u32) -> Option<u8> {
+        (BTN_FIRST..=BTN_LAST).contains(&code).then(|| (code - BTN_FIRST + 1) as u8)
     }
 }
 
@@ -167,6 +257,9 @@ struct Listener {
     devices: HashMap<PathBuf, Device>,
     pressed: HashMap<PathBuf, HashSet<KeyCode>>,
     tracker: ChordTracker,
+    /// Mice are open (a shortcut is a mouse button, or one is being
+    /// recorded).
+    mice: bool,
     last_scan: Instant,
     last_sweep: Instant,
     filter: KeyFilter,
@@ -188,6 +281,7 @@ impl Listener {
             devices,
             pressed: HashMap::new(),
             tracker: ChordTracker::default(),
+            mice: false,
             last_scan: Instant::now(),
             last_sweep: Instant::now(),
             filter: KeyFilter::default(),
@@ -205,9 +299,17 @@ impl Listener {
                 self.release_all();
                 return;
             }
-            if self.last_scan.elapsed() > Duration::from_secs(3) {
+            let mice = {
+                let s = self.shared.lock();
+                hotkey::wants_mouse(&s.chords, s.capturing)
+            };
+            if mice != self.mice || self.last_scan.elapsed() > Duration::from_secs(3) {
+                if self.mice && !mice {
+                    self.close_mice();
+                }
+                self.mice = mice;
                 // Pick up hot-plugged keyboards (and permission changes).
-                let new = open_keyboards(&self.devices);
+                let new = open_devices(&self.devices, mice);
                 self.devices.extend(new);
                 self.last_scan = Instant::now();
             }
@@ -260,7 +362,9 @@ impl Listener {
                 Ok(events) => {
                     for ev in events {
                         if let EventSummary::Key(_, code, value) = ev.destructure() {
-                            keys.push((code, value));
+                            if is_tracked(code) {
+                                keys.push((code, value));
+                            }
                         }
                     }
                 }
@@ -300,12 +404,12 @@ impl Listener {
     /// Sends a key from a held keyboard on to apps, unless it's Escape
     /// cancelling the dictation or the key that finished the shortcut.
     fn pass_on(&mut self, code: KeyCode, value: i32, completed: bool) {
-        let (chord, recording) = {
+        let (chords, recording) = {
             let s = self.shared.lock();
-            (s.chord.clone(), s.recording)
+            (s.chords.clone(), s.recording)
         };
         let input = FilterInput {
-            chord: chord.as_ref(),
+            chords: &chords,
             completed_chord: completed,
             recording,
             capturing: false,
@@ -395,6 +499,16 @@ impl Listener {
         self.release_due = None;
     }
 
+    /// Stops reading mice (no shortcut is a mouse button any more).
+    fn close_mice(&mut self) {
+        let mice: Vec<PathBuf> = self.devices.iter().filter(|(_, d)| !is_keyboard(d)).map(|(p, _)| p.clone()).collect();
+        for path in mice {
+            self.devices.remove(&path);
+            self.pressed.remove(&path);
+        }
+        self.evaluate(None);
+    }
+
     /// Forgets keys the kernel says are up (a release we never read).
     fn sweep_stale(&mut self) {
         self.last_sweep = Instant::now();
@@ -421,21 +535,15 @@ impl Listener {
     fn evaluate(&mut self, newly_pressed: Option<KeyCode>) -> bool {
         // Merge keys held on every keyboard.
         let pressed: HashSet<u32> = self.pressed.values().flatten().map(|k| k.code() as u32).collect();
-        let (chord, capturing) = {
+        let (chords, capturing) = {
             let s = self.shared.lock();
-            (s.chord.clone(), s.capturing)
+            (s.chords.clone(), s.capturing)
         };
-        let (events, mods) = self.tracker.update(
-            &EvdevKeys,
-            &pressed,
-            newly_pressed.map(|k| k.code() as u32),
-            chord.as_ref(),
-            capturing,
-        );
-        let completed = events.contains(&HotkeyEvent::Down);
+        let tracked = self.tracker.update(&EvdevKeys, &pressed, newly_pressed.map(|k| k.code() as u32), &chords, capturing);
+        let completed = tracked.completed;
         let mut s = self.shared.lock();
-        s.held_mods = mods;
-        for ev in events {
+        s.held_mods = tracked.mods;
+        for ev in tracked.events {
             if matches!(ev, HotkeyEvent::Captured(_)) {
                 s.capturing = false;
             }

@@ -88,6 +88,8 @@ pub struct AppState {
     pub desktop_shortcut: bool,
     pub desktop_trigger: Option<String>,
     pub capturing: bool,
+    /// The shortcut a recording replaces; None adds one.
+    pub capture_slot: Option<usize>,
     pub capture_error: Option<String>,
     pub notice: Option<Notice>,
     /// The text of the last paste that landed nowhere, to copy.
@@ -132,6 +134,7 @@ impl AppState {
             desktop_shortcut: false,
             desktop_trigger: None,
             capturing: false,
+            capture_slot: None,
             capture_error: None,
             notice: None,
             paste_failed: None,
@@ -238,6 +241,8 @@ impl AppState {
     pub fn edit_config(&mut self, cx: &mut Context<Self>, f: impl FnOnce(&mut Config)) {
         let theme_before = self.config.ui.theme;
         f(&mut self.config);
+        // As the controller does: a shortcut always stays.
+        self.config.hotkey.keep_a_shortcut();
         self.send(Command::SetConfig(Box::new(self.config.clone())));
         if self.config.ui.theme != theme_before {
             cx.emit(StateEvent::ThemeChanged);
@@ -273,8 +278,10 @@ impl AppState {
         .detach();
     }
 
-    pub fn start_capture(&mut self, cx: &mut Context<Self>) {
+    /// Records a shortcut: in place of the one at `slot`, or a new one.
+    pub fn start_capture(&mut self, slot: Option<usize>, cx: &mut Context<Self>) {
         self.capturing = true;
+        self.capture_slot = slot;
         self.capture_error = None;
         self.send(Command::CaptureHotkey(true));
         cx.notify();
@@ -288,15 +295,31 @@ impl AppState {
 
     fn on_captured(&mut self, chord: Chord, cx: &mut Context<Self>) {
         self.capturing = false;
-        match chord.is_valid() {
-            Ok(()) => {
-                self.capture_error = None;
-                self.edit_config(cx, |c| c.hotkey.chord = chord);
-            }
-            Err(e) => {
-                self.capture_error = Some(format!("{e} (pressed {chord})"));
-                cx.notify();
-            }
+        let slot = self.capture_slot.take();
+        let taken = self.config.hotkey.chords.iter().enumerate().any(|(i, c)| *c == chord && Some(i) != slot);
+        let problem = match chord.is_valid() {
+            Err(e) => Some(format!("{e} (pressed {})", chord.label())),
+            Ok(()) if taken => Some(format!("{} is already a shortcut", chord.label())),
+            Ok(()) => None,
+        };
+        if let Some(e) = problem {
+            self.capture_error = Some(e);
+            cx.notify();
+            return;
+        }
+        self.capture_error = None;
+        self.edit_config(cx, |c| match slot.filter(|i| *i < c.hotkey.chords.len()) {
+            Some(i) => c.hotkey.chords[i] = chord,
+            None => c.hotkey.chords.push(chord),
+        });
+    }
+
+    /// Removes a shortcut, keeping at least one.
+    pub fn remove_shortcut(&mut self, i: usize, cx: &mut Context<Self>) {
+        if self.config.hotkey.chords.len() > 1 && i < self.config.hotkey.chords.len() {
+            self.edit_config(cx, |c| {
+                c.hotkey.chords.remove(i);
+            });
         }
     }
 
@@ -401,15 +424,20 @@ impl AppState {
         !self.permissions.items.is_empty()
     }
 
-    /// Keycaps for the shortcut as it will actually trigger.
+    /// Keycaps for the (first) shortcut as it will actually trigger.
     pub fn shortcut_parts(&self) -> Vec<String> {
+        self.shortcuts().into_iter().next().unwrap_or_else(|| vec!["Not assigned".into()])
+    }
+
+    /// Keycaps for every shortcut; the desktop's one when it manages it.
+    pub fn shortcuts(&self) -> Vec<Vec<String>> {
         if self.desktop_shortcut {
-            match &self.desktop_trigger {
+            vec![match &self.desktop_trigger {
                 Some(t) => t.split('+').map(|p| p.trim().to_string()).filter(|p| !p.is_empty()).collect(),
                 None => vec!["Not assigned".into()],
-            }
+            }]
         } else {
-            self.config.hotkey.chord.parts()
+            self.config.hotkey.chords.iter().map(Chord::labels).collect()
         }
     }
 }

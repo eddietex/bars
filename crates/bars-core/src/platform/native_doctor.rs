@@ -38,7 +38,8 @@ pub fn report() -> String {
     let config_path = crate::paths::config_file();
     let cfg = Config::load_or_default(&config_path);
     let _ = writeln!(out, "\nSettings ({})", config_path.display());
-    let _ = writeln!(out, "  shortcut: {} ({:?})", cfg.hotkey.chord, cfg.hotkey.activation);
+    let shortcuts: Vec<String> = cfg.hotkey.chords.iter().map(|c| c.to_string()).collect();
+    let _ = writeln!(out, "  shortcuts: {} ({:?})", shortcuts.join(", "), cfg.hotkey.activation);
     let _ = writeln!(out, "  insertion: {:?}, restore clipboard: {}", cfg.insertion.method, cfg.insertion.restore_clipboard);
     let _ = writeln!(out, "  model: {}", cfg.model.id);
 

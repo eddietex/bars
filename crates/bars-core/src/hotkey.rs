@@ -1,6 +1,9 @@
 //! Platform-independent hotkey model: chords, the events backends emit, and
 //! the gesture recognizer that turns raw chord presses into dictation intents
-//! (push-to-talk, double-tap hands-free, toggle).
+//! (push-to-talk, double-tap hands-free, toggle). Any number of shortcuts
+//! start dictation, and a shortcut can be a mouse button: backends report
+//! buttons as keys of their own, named `Mouse3` (middle), `Mouse4` (back),
+//! `Mouse5` (forward) and so on.
 
 use std::collections::{HashMap, HashSet};
 use std::fmt;
@@ -57,14 +60,37 @@ const SUPER_LABEL: &str = "Win";
 const SUPER_LABEL: &str = "Super";
 
 /// A non-modifier key, named with a platform-neutral canonical name
-/// (`"Space"`, `"A"`, `"F9"`, `"Grave"`, ...). Platform backends map these
-/// names to native key codes.
+/// (`"Space"`, `"A"`, `"F9"`, `"Grave"`, `"Mouse4"`, ...). Platform
+/// backends map these names to native key codes.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct Key(pub String);
 
-/// A hotkey: one or more modifiers, optionally plus a single key.
-/// A chord without a key (e.g. Ctrl+Super) is a "modifier-only" chord, which is
-/// the most comfortable push-to-talk binding because it never types anything.
+impl Key {
+    /// A mouse button as a key.
+    pub fn mouse(button: u8) -> Key {
+        Key(format!("Mouse{button}"))
+    }
+
+    /// The mouse button this is, numbered as most systems do: 1 left,
+    /// 2 right, 3 middle, 4 back, 5 forward, then extra buttons.
+    pub fn mouse_button(&self) -> Option<u8> {
+        self.0.strip_prefix("Mouse")?.parse().ok().filter(|b| *b >= 1)
+    }
+
+    /// For keycaps: "Space", "Mouse 4" (the numbers gamers know: 3 is
+    /// the middle button, 4 and 5 back and forward).
+    pub fn label(&self) -> String {
+        match self.mouse_button() {
+            Some(b) => format!("Mouse {b}"),
+            None => self.0.clone(),
+        }
+    }
+}
+
+/// A hotkey: one or more modifiers, optionally plus a single key (or mouse
+/// button, which needs no modifier). A chord without a key (e.g.
+/// Ctrl+Super) is a "modifier-only" chord, which is the most comfortable
+/// push-to-talk binding because it never types anything.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct Chord {
     pub mods: Mods,
@@ -82,8 +108,12 @@ impl Default for Chord {
 
 impl Chord {
     pub fn is_valid(&self) -> Result<(), &'static str> {
+        // Any button but the two every click needs, with or without modifiers.
+        if let Some(button) = self.mouse_button() {
+            return if button >= 3 { Ok(()) } else { Err("Left and right click can't be shortcuts") };
+        }
         if self.mods.is_empty() {
-            return Err("Shortcut must include at least one modifier (Ctrl, Alt, Shift or Super)");
+            return Err("A keyboard shortcut must include at least one modifier (Ctrl, Alt, Shift or Super)");
         }
         // Fn alone is fine: it never combines into anything else.
         if self.key.is_none() && self.mods.bits().count_ones() < 2 && self.mods != Mods::FN {
@@ -97,13 +127,32 @@ impl Chord {
         self.mods == Mods::FN && self.key.is_none()
     }
 
-    /// Labels for rendering keycaps, e.g. `["Ctrl", "Super", "Space"]`.
+    /// The mouse button this shortcut uses, if any.
+    pub fn mouse_button(&self) -> Option<u8> {
+        self.key.as_ref().and_then(Key::mouse_button)
+    }
+
+    /// The canonical names of its parts, e.g. `["Ctrl", "Super", "Space"]`.
     pub fn parts(&self) -> Vec<String> {
         let mut parts: Vec<String> = self.mods.labels().into_iter().map(String::from).collect();
         if let Some(key) = &self.key {
             parts.push(key.0.clone());
         }
         parts
+    }
+
+    /// Labels for rendering keycaps, e.g. `["Ctrl", "Mouse 4"]`.
+    pub fn labels(&self) -> Vec<String> {
+        let mut labels: Vec<String> = self.mods.labels().into_iter().map(String::from).collect();
+        if let Some(key) = &self.key {
+            labels.push(key.label());
+        }
+        labels
+    }
+
+    /// For sentences: "Ctrl + Mouse 4".
+    pub fn label(&self) -> String {
+        self.labels().join(" + ")
     }
 }
 
@@ -188,27 +237,66 @@ pub enum HotkeyEvent {
 }
 
 /// How a platform names its key codes. Implemented by each hotkey backend
-/// (evdev codes, Windows virtual keys, macOS key codes).
+/// (evdev codes, Windows virtual keys, macOS key codes), which give mouse
+/// buttons codes of their own.
 pub trait KeyMap {
     /// The modifier a key code represents, if any.
     fn modifier_of(&self, code: u32) -> Option<Mods>;
-    /// Canonical name ("Space", "A", "F9") for a non-modifier key.
+    /// Canonical name ("Space", "A", "F9", "Mouse4") for a non-modifier key.
     fn name_of(&self, code: u32) -> Option<String>;
     /// Key code for a canonical name.
     fn code_of(&self, name: &str) -> Option<u32>;
     fn is_escape(&self, code: u32) -> bool;
+    /// The mouse button a code stands for (see [`Key::mouse_button`]).
+    fn mouse_button(&self, code: u32) -> Option<u8> {
+        let _ = code;
+        None
+    }
+}
+
+/// Whether a key counts for shortcuts: every key, but only the mouse
+/// buttons a shortcut uses (any but left and right while one is being
+/// recorded), so clicking never gets in a shortcut's way.
+pub fn counts(map: &dyn KeyMap, code: u32, chords: &[Chord], capturing: bool) -> bool {
+    match map.mouse_button(code) {
+        None => true,
+        Some(button) if capturing => button >= 3,
+        Some(button) => chords.iter().any(|c| c.mouse_button() == Some(button)),
+    }
+}
+
+/// Some shortcut is a mouse button, or one is being recorded: backends
+/// listen to the mouse.
+pub fn wants_mouse(chords: &[Chord], capturing: bool) -> bool {
+    capturing || chords.iter().any(|c| c.mouse_button().is_some())
 }
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 enum ChordState {
     Inactive,
-    Active,
-    /// Another key was pressed while the chord was held.
-    Interrupted,
+    /// The shortcut at this index is held.
+    Active(usize),
+    /// Another key was pressed while the shortcut at this index was held.
+    Interrupted(usize),
+}
+
+/// What one [`ChordTracker::update`] found.
+#[derive(Debug, Default)]
+pub struct Tracked {
+    pub events: Vec<HotkeyEvent>,
+    /// Modifiers held.
+    pub mods: Mods,
+    /// The key just pressed completed a shortcut (backends that can drop
+    /// input keep it from the app).
+    pub completed: bool,
 }
 
 /// Turns the set of currently pressed keys into chord [`HotkeyEvent`]s, and
 /// records new chords for the shortcut picker. Shared by every OS backend.
+///
+/// Every shortcut does the same, so one held shortcut turning into another
+/// (Ctrl+Super, then Space with Ctrl+Super+Space also a shortcut) carries
+/// on as the same press.
 #[derive(Debug)]
 pub struct ChordTracker {
     state: ChordState,
@@ -226,29 +314,30 @@ impl Default for ChordTracker {
 
 impl ChordTracker {
     /// Feed the full pressed set after each key change. `newly_pressed` is
-    /// the key that just went down (None for releases). Returns events and,
-    /// separately, a chord when capture finished.
+    /// the key that just went down (None for releases).
     pub fn update(
         &mut self,
         map: &dyn KeyMap,
-        pressed: &std::collections::HashSet<u32>,
+        pressed: &HashSet<u32>,
         newly_pressed: Option<u32>,
-        chord: Option<&Chord>,
+        chords: &[Chord],
         capturing: bool,
-    ) -> (Vec<HotkeyEvent>, Mods) {
-        let mods = pressed
+    ) -> Tracked {
+        let keys: HashSet<u32> = pressed.iter().copied().filter(|k| counts(map, *k, chords, capturing)).collect();
+        let newly = newly_pressed.filter(|k| keys.contains(k));
+        let mods = keys
             .iter()
             .filter_map(|k| map.modifier_of(*k))
             .fold(Mods::empty(), |a, m| a | m);
-        let mut out = Vec::new();
+        let mut out = Tracked { mods, ..Default::default() };
 
         if capturing {
             self.state = ChordState::Inactive;
-            if let Some(k) = newly_pressed {
+            if let Some(k) = newly {
                 if !self.capture_keys.contains(&k) {
                     self.capture_keys.push(k);
                 }
-            } else if pressed.is_empty() && !self.capture_keys.is_empty() {
+            } else if keys.is_empty() && !self.capture_keys.is_empty() {
                 let keys = std::mem::take(&mut self.capture_keys);
                 let cmods = keys
                     .iter()
@@ -260,61 +349,81 @@ impl ChordTracker {
                     .find(|k| map.modifier_of(**k).is_none())
                     .and_then(|k| map.name_of(*k))
                     .map(Key);
-                out.push(HotkeyEvent::Captured(Chord { mods: cmods, key }));
+                out.events.push(HotkeyEvent::Captured(Chord { mods: cmods, key }));
             }
-            return (out, mods);
+            return out;
         }
         self.capture_keys.clear();
 
-        if newly_pressed.is_some_and(|k| map.is_escape(k)) {
-            out.push(HotkeyEvent::Escape);
+        if newly.is_some_and(|k| map.is_escape(k)) {
+            out.events.push(HotkeyEvent::Escape);
         }
-        let Some(chord) = chord else { return (out, mods) };
-        let chord_key = match &chord.key {
-            Some(k) => match map.code_of(&k.0) {
-                Some(code) => Some(code),
-                None => return (out, mods), // unmappable key name
-            },
-            None => None,
+        let others: Vec<u32> = keys.iter().copied().filter(|k| map.modifier_of(*k).is_none()).collect();
+        // A shortcut whose key this platform doesn't have never matches.
+        let key_of = |c: &Chord| c.key.as_ref().map(|k| map.code_of(&k.0).ok_or(()));
+        let exact = |c: &Chord| {
+            mods == c.mods
+                && match key_of(c) {
+                    None => others.is_empty(),
+                    Some(Ok(k)) => others.len() == 1 && others[0] == k,
+                    Some(Err(())) => false,
+                }
         };
-        let others: Vec<u32> = pressed.iter().copied().filter(|k| map.modifier_of(*k).is_none()).collect();
-        let chord_held = mods.contains(chord.mods) && chord_key.is_none_or(|k| pressed.contains(&k));
-        let exact = mods == chord.mods
-            && match chord_key {
-                None => others.is_empty(),
-                Some(k) => others.len() == 1 && others[0] == k,
-            };
+        let held = |i: usize| {
+            chords.get(i).is_some_and(|c| {
+                mods.contains(c.mods)
+                    && match key_of(c) {
+                        None => true,
+                        Some(Ok(k)) => keys.contains(&k),
+                        Some(Err(())) => false,
+                    }
+            })
+        };
+        let matching = chords.iter().position(exact);
         self.state = match self.state {
-            ChordState::Inactive if exact => {
-                out.push(HotkeyEvent::Down);
-                ChordState::Active
+            ChordState::Inactive => match matching {
+                Some(i) => {
+                    out.events.push(HotkeyEvent::Down);
+                    out.completed = newly.is_some();
+                    ChordState::Active(i)
+                }
+                None => ChordState::Inactive,
+            },
+            ChordState::Active(i) => {
+                if chords.get(i).is_some_and(exact) {
+                    ChordState::Active(i)
+                } else if let Some(j) = matching {
+                    // Held into another shortcut: the same press goes on.
+                    out.completed = newly.is_some();
+                    ChordState::Active(j)
+                } else if held(i) {
+                    out.events.push(HotkeyEvent::Interrupted);
+                    ChordState::Interrupted(i)
+                } else {
+                    out.events.push(HotkeyEvent::Up);
+                    ChordState::Inactive
+                }
             }
-            ChordState::Inactive => ChordState::Inactive,
-            ChordState::Active if exact => ChordState::Active,
-            ChordState::Active if chord_held => {
-                out.push(HotkeyEvent::Interrupted);
-                ChordState::Interrupted
-            }
-            ChordState::Active | ChordState::Interrupted if !chord_held => {
-                out.push(HotkeyEvent::Up);
+            ChordState::Interrupted(i) if held(i) => ChordState::Interrupted(i),
+            ChordState::Interrupted(_) => {
+                out.events.push(HotkeyEvent::Up);
                 ChordState::Inactive
             }
-            s => s,
         };
-        (out, mods)
+        out
     }
 
-    /// Whether the chord is currently held (e.g. to suppress the Start menu).
+    /// Whether a shortcut is currently held.
     pub fn active(&self) -> bool {
-        self.state == ChordState::Active
+        matches!(self.state, ChordState::Active(_))
     }
 }
 
 /// What [`KeyFilter`] needs to know about the moment a key changed.
 #[derive(Clone, Copy, Debug, Default)]
 pub struct FilterInput<'a> {
-    pub chord: Option<&'a Chord>,
-    /// The tracker reported [`HotkeyEvent::Down`] for this very press.
+    pub chords: &'a [Chord],
+    /// This very press completed a shortcut ([`Tracked::completed`]).
     pub completed_chord: bool,
     /// A dictation is recording (Escape cancels it).
     pub recording: bool,
@@ -332,14 +441,15 @@ pub enum KeyChange {
 }
 
 /// Decides which key events a backend that can drop input (macOS event
-/// tap, Windows keyboard hook, Linux while it holds the keyboards) keeps
-/// from the focused app: Escape cancels only the dictation, the key that
-/// finishes the shortcut types nothing, and recording a shortcut doesn't
-/// also trigger it in the app.
+/// tap, Windows keyboard and mouse hooks, Linux while it holds the
+/// keyboards) keeps from the focused app: Escape cancels only the
+/// dictation, the key or mouse button that finishes a shortcut does
+/// nothing else, and recording a shortcut doesn't also trigger it in the
+/// app. Mouse buttons no shortcut uses always pass.
 ///
 /// Modifiers always pass, since a dropped one would stay held in other
-/// apps. Fn is the exception when it is the whole shortcut, so the
-/// system's Globe-key action (emoji picker, input switch) doesn't fire too.
+/// apps. Fn is the exception when it is a whole shortcut, so the system's
+/// Globe-key action (emoji picker, input switch) doesn't fire too.
 #[derive(Debug, Default)]
 pub struct KeyFilter {
     /// Keys whose press was dropped: their repeats and release go too.
@@ -357,14 +467,12 @@ impl KeyFilter {
                 self.dropped.remove(&code);
             }
         }
+        if !counts(map, code, input.chords, input.capturing) {
+            return false;
+        }
         let drop = match map.modifier_of(code) {
-            Some(m) => m == Mods::FN && input.chord.is_some_and(Chord::is_fn_only),
-            None => {
-                input.capturing
-                    || (input.recording && map.is_escape(code))
-                    || (input.completed_chord
-                        && input.chord.and_then(|c| c.key.as_ref()).and_then(|k| map.code_of(&k.0)) == Some(code))
-            }
+            Some(m) => m == Mods::FN && input.chords.iter().any(Chord::is_fn_only),
+            None => input.capturing || (input.recording && map.is_escape(code)) || input.completed_chord,
         };
         if drop {
             self.dropped.insert(code);
@@ -727,6 +835,8 @@ mod tests {
             match code {
                 10 => Some("Space".into()),
                 11 => Some("Left".into()),
+                // Mouse buttons 1-9.
+                201..=209 => Some(Key::mouse((code - 200) as u8).0),
                 _ => None,
             }
         }
@@ -734,12 +844,111 @@ mod tests {
             match name {
                 "Space" => Some(10),
                 "Left" => Some(11),
-                _ => None,
+                _ => Key(name.into()).mouse_button().map(|b| 200 + b as u32),
             }
         }
         fn is_escape(&self, code: u32) -> bool {
             code == 99
         }
+        fn mouse_button(&self, code: u32) -> Option<u8> {
+            (201..=209).contains(&code).then(|| (code - 200) as u8)
+        }
+    }
+
+    const LEFT_CLICK: u32 = 201;
+    const MIDDLE: u32 = 203;
+    const BACK: u32 = 204;
+
+    fn chords(list: &[&str]) -> Vec<Chord> {
+        list.iter().map(|c| c.parse().unwrap()).collect()
+    }
+
+    fn feed_all(t: &mut ChordTracker, keys: &mut HashSet<u32>, code: u32, down: bool, chords: &[Chord], capturing: bool) -> Tracked {
+        if down {
+            keys.insert(code);
+        } else {
+            keys.remove(&code);
+        }
+        t.update(&TestMap, keys, down.then_some(code), chords, capturing)
+    }
+
+    #[test]
+    fn any_of_several_shortcuts_starts() {
+        let all = chords(&["Ctrl+Super", "Shift+Space", "Mouse4"]);
+        let (mut t, mut k) = (ChordTracker::default(), HashSet::new());
+        feed_all(&mut t, &mut k, 3, true, &all, false);
+        assert_eq!(feed_all(&mut t, &mut k, 10, true, &all, false).events, vec![HotkeyEvent::Down]);
+        assert_eq!(feed_all(&mut t, &mut k, 10, false, &all, false).events, vec![HotkeyEvent::Up]);
+        assert!(feed_all(&mut t, &mut k, 3, false, &all, false).events.is_empty());
+        let down = feed_all(&mut t, &mut k, BACK, true, &all, false);
+        assert_eq!(down.events, vec![HotkeyEvent::Down]);
+        assert!(down.completed);
+        assert_eq!(feed_all(&mut t, &mut k, BACK, false, &all, false).events, vec![HotkeyEvent::Up]);
+    }
+
+    #[test]
+    fn holding_one_shortcut_into_another_goes_on() {
+        let all = chords(&["Ctrl+Super", "Ctrl+Super+Space"]);
+        let (mut t, mut k) = (ChordTracker::default(), HashSet::new());
+        feed_all(&mut t, &mut k, 1, true, &all, false);
+        assert_eq!(feed_all(&mut t, &mut k, 2, true, &all, false).events, vec![HotkeyEvent::Down]);
+        // Space makes it the longer shortcut: no new events, and Space is
+        // kept from the app.
+        let space = feed_all(&mut t, &mut k, 10, true, &all, false);
+        assert!(space.events.is_empty() && space.completed);
+        assert!(feed_all(&mut t, &mut k, 10, false, &all, false).events.is_empty());
+        assert_eq!(feed_all(&mut t, &mut k, 2, false, &all, false).events, vec![HotkeyEvent::Up]);
+        // A key no shortcut has still interrupts.
+        feed_all(&mut t, &mut k, 2, true, &all, false);
+        assert_eq!(feed_all(&mut t, &mut k, 11, true, &all, false).events, vec![HotkeyEvent::Interrupted]);
+    }
+
+    #[test]
+    fn clicks_never_get_in_the_way() {
+        let all = chords(&["Ctrl+Super"]);
+        let (mut t, mut k) = (ChordTracker::default(), HashSet::new());
+        // Holding the left button (dragging) doesn't block the shortcut.
+        feed_all(&mut t, &mut k, LEFT_CLICK, true, &all, false);
+        feed_all(&mut t, &mut k, 1, true, &all, false);
+        assert_eq!(feed_all(&mut t, &mut k, 2, true, &all, false).events, vec![HotkeyEvent::Down]);
+        // Nor does a button no shortcut uses interrupt it.
+        assert!(feed_all(&mut t, &mut k, MIDDLE, true, &all, false).events.is_empty());
+        let mut f = KeyFilter::default();
+        let input = FilterInput { chords: &all, completed_chord: true, ..Default::default() };
+        assert!(!f.should_drop(&TestMap, MIDDLE, KeyChange::Press, &input));
+    }
+
+    #[test]
+    fn records_a_mouse_button_but_never_a_click() {
+        let all = chords(&["Ctrl+Super"]);
+        let (mut t, mut k) = (ChordTracker::default(), HashSet::new());
+        // The click that started recording, then Ctrl + the back button.
+        assert!(feed_all(&mut t, &mut k, LEFT_CLICK, true, &all, true).events.is_empty());
+        assert!(feed_all(&mut t, &mut k, LEFT_CLICK, false, &all, true).events.is_empty());
+        feed_all(&mut t, &mut k, 1, true, &all, true);
+        feed_all(&mut t, &mut k, BACK, true, &all, true);
+        feed_all(&mut t, &mut k, BACK, false, &all, true);
+        let done = feed_all(&mut t, &mut k, 1, false, &all, true);
+        assert_eq!(done.events, vec![HotkeyEvent::Captured("Ctrl+Mouse4".parse().unwrap())]);
+        // While recording, the button is kept from the app; clicks never are.
+        let mut f = KeyFilter::default();
+        let cap = FilterInput { capturing: true, ..Default::default() };
+        assert!(f.should_drop(&TestMap, BACK, KeyChange::Press, &cap));
+        assert!(!f.should_drop(&TestMap, LEFT_CLICK, KeyChange::Press, &cap));
+    }
+
+    #[test]
+    fn mouse_shortcuts() {
+        let back: Chord = "Mouse4".parse().unwrap();
+        assert_eq!(back.mouse_button(), Some(4));
+        assert!(back.is_valid().is_ok());
+        assert!("Ctrl+Mouse3".parse::<Chord>().unwrap().is_valid().is_ok());
+        assert!("Mouse1".parse::<Chord>().unwrap().is_valid().is_err());
+        assert!("Ctrl+Mouse2".parse::<Chord>().unwrap().is_valid().is_err());
+        assert_eq!(back.to_string(), "Mouse4");
+        assert_eq!("ctrl+mouse5".parse::<Chord>().unwrap().label(), "Ctrl + Mouse 5");
+        assert_eq!(Key::mouse(3).label(), "Mouse 3");
+        assert!(wants_mouse(&[back], false) && wants_mouse(&[], true) && !wants_mouse(&chords(&["Ctrl+Super"]), false));
     }
 
     fn feed(t: &mut ChordTracker, keys: &mut std::collections::HashSet<u32>, code: u32, down: bool, chord: &Chord, capturing: bool) -> Vec<HotkeyEvent> {
@@ -748,7 +957,7 @@ mod tests {
         } else {
             keys.remove(&code);
         }
-        t.update(&TestMap, keys, down.then_some(code), Some(chord), capturing).0
+        t.update(&TestMap, keys, down.then_some(code), std::slice::from_ref(chord), capturing).events
     }
 
     #[test]
@@ -795,10 +1004,10 @@ mod tests {
     fn filter_drops_escape_only_while_recording() {
         let chord: Chord = "Ctrl+Super".parse().unwrap();
         let mut f = KeyFilter::default();
-        let idle = FilterInput { chord: Some(&chord), ..Default::default() };
+        let idle = FilterInput { chords: std::slice::from_ref(&chord), ..Default::default() };
         assert!(!f.should_drop(&TestMap, 99, KeyChange::Press, &idle));
         assert!(!f.should_drop(&TestMap, 99, KeyChange::Release, &idle));
-        let rec = FilterInput { chord: Some(&chord), recording: true, ..Default::default() };
+        let rec = FilterInput { chords: std::slice::from_ref(&chord), recording: true, ..Default::default() };
         assert!(f.should_drop(&TestMap, 99, KeyChange::Press, &rec));
         // Its autorepeat and release go too, even once recording stopped.
         assert!(f.should_drop(&TestMap, 99, KeyChange::Repeat, &idle));
@@ -813,7 +1022,7 @@ mod tests {
     fn filter_drops_the_key_completing_the_chord_but_never_modifiers() {
         let chord: Chord = "Ctrl+Space".parse().unwrap();
         let mut f = KeyFilter::default();
-        let done = FilterInput { chord: Some(&chord), completed_chord: true, ..Default::default() };
+        let done = FilterInput { chords: std::slice::from_ref(&chord), completed_chord: true, ..Default::default() };
         assert!(!f.should_drop(&TestMap, 1, KeyChange::Press, &done));
         assert!(f.should_drop(&TestMap, 10, KeyChange::Press, &done));
         assert!(f.should_drop(&TestMap, 10, KeyChange::Release, &FilterInput::default()));
@@ -849,10 +1058,10 @@ mod tests {
         let fn_only: Chord = "Fn".parse().unwrap();
         let fn_ctrl: Chord = "Fn+Ctrl".parse().unwrap();
         let press = KeyChange::Press;
-        assert!(f.should_drop(&FnMap, 7, press, &FilterInput { chord: Some(&fn_only), ..Default::default() }));
+        assert!(f.should_drop(&FnMap, 7, press, &FilterInput { chords: std::slice::from_ref(&fn_only), ..Default::default() }));
         assert!(f.should_drop(&FnMap, 7, KeyChange::Release, &FilterInput::default()));
-        assert!(!f.should_drop(&FnMap, 7, press, &FilterInput { chord: Some(&fn_ctrl), ..Default::default() }));
-        assert!(!f.should_drop(&FnMap, 1, press, &FilterInput { chord: Some(&fn_only), ..Default::default() }));
+        assert!(!f.should_drop(&FnMap, 7, press, &FilterInput { chords: std::slice::from_ref(&fn_ctrl), ..Default::default() }));
+        assert!(!f.should_drop(&FnMap, 1, press, &FilterInput { chords: std::slice::from_ref(&fn_only), ..Default::default() }));
     }
 
     #[test]

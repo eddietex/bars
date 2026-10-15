@@ -1,11 +1,19 @@
-//! Canonical key names <-> Windows virtual-key codes.
+//! Canonical key names <-> Windows virtual-key codes, mouse buttons
+//! included (Windows has virtual keys for them).
 
-use crate::hotkey::{KeyMap, Mods};
+use crate::hotkey::{Key, KeyMap, Mods};
 
 pub const VK_ESCAPE: u32 = 0x1B;
 /// An unassigned virtual key, tapped to keep Windows from opening the Start
 /// menu when a chord containing the Windows key is released.
 pub const VK_UNASSIGNED: u16 = 0xE8;
+pub const VK_MBUTTON: u32 = 0x04;
+pub const VK_XBUTTON1: u32 = 0x05;
+pub const VK_XBUTTON2: u32 = 0x06;
+
+/// Mouse buttons (left, right, middle, back, forward) and their virtual
+/// keys. Windows reports no further buttons.
+const MOUSE: &[(u8, u32)] = &[(1, 0x01), (2, 0x02), (3, VK_MBUTTON), (4, VK_XBUTTON1), (5, VK_XBUTTON2)];
 
 const NAMED: &[(&str, u32)] = &[
     ("Space", 0x20),
@@ -55,6 +63,9 @@ impl KeyMap for WinKeys {
     }
 
     fn name_of(&self, vk: u32) -> Option<String> {
+        if let Some(button) = self.mouse_button(vk) {
+            return Some(Key::mouse(button).0);
+        }
         if let Some((n, _)) = NAMED.iter().find(|(_, c)| *c == vk) {
             return Some((*n).to_string());
         }
@@ -67,6 +78,9 @@ impl KeyMap for WinKeys {
 
     fn code_of(&self, name: &str) -> Option<u32> {
         let name = crate::hotkey::canonical_key_name(name);
+        if let Some(button) = Key(name.clone()).mouse_button() {
+            return MOUSE.iter().find(|(b, _)| *b == button).map(|(_, vk)| *vk);
+        }
         if let Some((_, c)) = NAMED.iter().find(|(n, _)| *n == name) {
             return Some(*c);
         }
@@ -83,6 +97,10 @@ impl KeyMap for WinKeys {
     fn is_escape(&self, vk: u32) -> bool {
         vk == VK_ESCAPE
     }
+
+    fn mouse_button(&self, vk: u32) -> Option<u8> {
+        MOUSE.iter().find(|(_, v)| *v == vk).map(|(b, _)| *b)
+    }
 }
 
 #[cfg(test)]
@@ -91,7 +109,7 @@ mod tests {
 
     #[test]
     fn names_roundtrip() {
-        for name in ["Space", "A", "7", "F9", "F24", "Grave", "Pagedown"] {
+        for name in ["Space", "A", "7", "F9", "F24", "Grave", "Pagedown", "Mouse3", "Mouse4", "Mouse5"] {
             let c = WinKeys.code_of(name).unwrap_or_else(|| panic!("{name}"));
             assert_eq!(WinKeys.name_of(c).unwrap(), name);
         }

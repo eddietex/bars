@@ -425,8 +425,10 @@ impl Onboarding {
                                             s.edit_config(cx, |c| {
                                                 c.hotkey.backend = bars_core::config::HotkeyBackendKind::Portal;
                                                 // Desktops can't bind bare modifiers.
-                                                if c.hotkey.chord.key.is_none() {
-                                                    c.hotkey.chord.key = Some(bars_core::hotkey::Key("Space".into()));
+                                                if let Some(first) = c.hotkey.chords.first_mut() {
+                                                    if first.key.is_none() {
+                                                        first.key = Some(bars_core::hotkey::Key("Space".into()));
+                                                    }
                                                 }
                                             })
                                         });

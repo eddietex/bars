@@ -1,11 +1,15 @@
-//! Canonical key names <-> macOS virtual key codes (kVK_*).
+//! Canonical key names <-> macOS virtual key codes (kVK_*), and mouse
+//! buttons, which get codes of their own from `MOUSE_BASE`.
 
-use crate::hotkey::{KeyMap, Mods};
+use crate::hotkey::{Key, KeyMap, Mods};
 
 pub const KVK_ESCAPE: u32 = 0x35;
 /// The Globe key's own key events (newer Apple keyboards), sent next to
 /// Fn's flag change.
 pub const KVK_GLOBE: u32 = 0xB3;
+/// Mouse button codes: this plus macOS's button number (0 left, 1 right,
+/// 2 middle, 3 back, 4 forward, ...).
+pub const MOUSE_BASE: u32 = 0x1000;
 
 const KEYS: &[(&str, u32)] = &[
     ("A", 0x00), ("S", 0x01), ("D", 0x02), ("F", 0x03), ("H", 0x04), ("G", 0x05), ("Z", 0x06),
@@ -46,16 +50,26 @@ impl KeyMap for MacKeys {
     }
 
     fn name_of(&self, code: u32) -> Option<String> {
+        if let Some(button) = self.mouse_button(code) {
+            return Some(Key::mouse(button).0);
+        }
         KEYS.iter().find(|(_, c)| *c == code).map(|(n, _)| (*n).to_string())
     }
 
     fn code_of(&self, name: &str) -> Option<u32> {
         let name = crate::hotkey::canonical_key_name(name);
+        if let Some(button) = Key(name.clone()).mouse_button() {
+            return Some(MOUSE_BASE + button as u32 - 1);
+        }
         KEYS.iter().find(|(n, _)| *n == name).map(|(_, c)| *c)
     }
 
     fn is_escape(&self, code: u32) -> bool {
         code == KVK_ESCAPE
+    }
+
+    fn mouse_button(&self, code: u32) -> Option<u8> {
+        code.checked_sub(MOUSE_BASE).filter(|b| *b < 32).map(|b| b as u8 + 1)
     }
 }
 
@@ -65,7 +79,7 @@ mod tests {
 
     #[test]
     fn names_roundtrip() {
-        for name in ["Space", "A", "7", "F9", "Grave", "Pagedown"] {
+        for name in ["Space", "A", "7", "F9", "Grave", "Pagedown", "Mouse3", "Mouse4", "Mouse12"] {
             let c = MacKeys.code_of(name).unwrap_or_else(|| panic!("{name}"));
             assert_eq!(MacKeys.name_of(c).unwrap(), name);
         }

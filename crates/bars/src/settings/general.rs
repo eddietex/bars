@@ -8,11 +8,11 @@ use bars_core::hotkey::{Activation, Mods};
 use super::{Page, SettingsView};
 
 #[cfg(target_os = "macos")]
-const MODIFIER_ONLY_HINT: &str = "Works in every app. Modifier-only shortcuts like Fn or Ctrl + Cmd never type anything.";
+const MODIFIER_ONLY_HINT: &str = "Each one works in every app. Modifier-only shortcuts like Fn or Ctrl + Cmd never type anything, and a middle or side mouse button works too.";
 #[cfg(target_os = "windows")]
-const MODIFIER_ONLY_HINT: &str = "Works in every app. Modifier-only shortcuts like Ctrl + Win never type anything.";
+const MODIFIER_ONLY_HINT: &str = "Each one works in every app. Modifier-only shortcuts like Ctrl + Win never type anything, and a middle or side mouse button works too.";
 #[cfg(not(any(target_os = "macos", target_os = "windows")))]
-const MODIFIER_ONLY_HINT: &str = "Works in every app. Modifier-only shortcuts like Ctrl + Super never type anything.";
+const MODIFIER_ONLY_HINT: &str = "Each one works in every app. Modifier-only shortcuts like Ctrl + Super never type anything, and a middle or side mouse button works too.";
 
 #[cfg(target_os = "linux")]
 const SMART_SPACING_HINT: &str = "Reads the text around the cursor to add spaces, match capitalization and drop a final full stop mid-sentence. Works in apps with accessibility support (most GTK apps). Nothing is stored.";
@@ -28,9 +28,12 @@ impl SettingsView {
         let st = self.state.read(cx);
         let cfg = st.config.clone();
         let capturing = st.capturing;
+        let capture_slot = st.capture_slot;
         let capture_error = st.capture_error.clone();
         // The Globe key also opens the emoji picker/dictation unless told not to.
-        let globe_hint = cfg!(target_os = "macos") && cfg.hotkey.chord.mods.contains(Mods::FN);
+        let globe_hint = cfg!(target_os = "macos") && cfg.hotkey.chords.iter().any(|c| c.mods.contains(Mods::FN));
+        // Linux reads the mouse without holding it: the button also reaches the app.
+        let mouse_hint = cfg!(target_os = "linux") && cfg.hotkey.chords.iter().any(|c| c.mouse_button().is_some());
         let globe_link = div()
             .id("globe-settings")
             .text_color(p.accent_text)
@@ -45,7 +48,7 @@ impl SettingsView {
         let hotkeys_ok = st.hotkeys_active;
         let secure_input = st.secure_input.clone();
         let desktop_shortcut = st.desktop_shortcut;
-        let shortcut_parts = st.shortcut_parts();
+        let shortcuts = st.shortcuts();
         let state = self.state.clone();
 
         let set = {
@@ -55,58 +58,75 @@ impl SettingsView {
             }
         };
 
-        // --- Shortcut recorder ------------------------------------------
-        let recorder = {
-            let state = state.clone();
-            h_row()
-                .gap(px(10.))
-                .child(if capturing {
-                    h_row()
-                        .h(px(34.))
-                        .px(px(14.))
-                        .rounded(px(8.))
-                        .border_1()
-                        .border_color(p.accent)
-                        .bg(p.accent_soft)
-                        .text_size(px(13.))
-                        .text_color(p.accent_text)
-                        .child("Press your shortcut…")
-                        .into_any_element()
-                } else {
-                    keycaps(shortcut_parts, p, true).into_any_element()
+        // --- Shortcuts ---------------------------------------------------
+        // Without a running shortcut listener no keys would ever arrive:
+        // recording opens Setup instead, to show what to allow.
+        let view = cx.entity().downgrade();
+        let record = |slot: Option<usize>| {
+            let (state, view) = (state.clone(), view.clone());
+            move |_: &ClickEvent, _: &mut Window, cx: &mut App| {
+                if !hotkeys_ok {
+                    let _ = view.update(cx, |v, cx| v.go(Page::Setup, cx));
+                    return;
+                }
+                state.update(cx, |s, cx| {
+                    if s.desktop_shortcut {
+                        s.send(Command::ConfigureShortcut);
+                    } else {
+                        s.start_capture(slot, cx)
+                    }
                 })
-                .child(if capturing {
-                    button("cancel-capture", "Cancel", ButtonKind::Ghost, p)
-                        .on_click({
-                            let state = state.clone();
-                            move |_, _, cx| state.update(cx, |s, cx| s.stop_capture(cx))
-                        })
-                        .into_any_element()
-                } else {
-                    icon_label_button("change-shortcut", I::Pencil, "Change", ButtonKind::Accent, p)
-                        .when(!hotkeys_ok, |el| el.opacity(0.5))
-                        .on_click({
-                            let state = state.clone();
-                            // Without a running shortcut listener no keys would
-                            // ever arrive: show what to allow instead.
-                            let open_setup = cx.listener(|this, _: &ClickEvent, _, cx| this.go(Page::Setup, cx));
-                            move |ev, window, cx| {
-                                if !hotkeys_ok {
-                                    open_setup(ev, window, cx);
-                                    return;
-                                }
-                                state.update(cx, |s, cx| {
-                                    if s.desktop_shortcut {
-                                        s.send(Command::ConfigureShortcut);
-                                    } else {
-                                        s.start_capture(cx)
-                                    }
-                                })
-                            }
-                        })
-                        .into_any_element()
-                })
+            }
         };
+        let listening = || {
+            h_row()
+                .h(px(34.))
+                .px(px(14.))
+                .rounded(px(8.))
+                .border_1()
+                .border_color(p.accent)
+                .bg(p.accent_soft)
+                .text_size(px(13.))
+                .text_color(p.accent_text)
+                .child("Press keys or a mouse button…")
+        };
+        let cancel = |id: &'static str| {
+            let state = state.clone();
+            button(id, "Cancel", ButtonKind::Ghost, p).on_click(move |_, _, cx| state.update(cx, |s, cx| s.stop_capture(cx)))
+        };
+        let removable = !desktop_shortcut && shortcuts.len() > 1;
+        let mut shortcut_list = v_col().items_end().gap(px(10.));
+        for (i, parts) in shortcuts.into_iter().enumerate() {
+            let recording_this = capturing && capture_slot == Some(i);
+            shortcut_list = shortcut_list.child(if recording_this {
+                h_row().gap(px(10.)).child(listening()).child(cancel("cancel-capture")).into_any_element()
+            } else {
+                h_row()
+                    .gap(px(10.))
+                    .child(keycaps(parts, p, true))
+                    .child(
+                        icon_label_button(("change-shortcut", i), I::Pencil, "Change", ButtonKind::Accent, p)
+                            .when(!hotkeys_ok, |el| el.opacity(0.5))
+                            .on_click(record(Some(i))),
+                    )
+                    .when(removable, |el| {
+                        let state = state.clone();
+                        el.child(icon_button(("remove-shortcut", i), I::Trash, p.text_muted, p).on_click(
+                            move |_, _, cx| state.update(cx, |s, cx| s.remove_shortcut(i, cx)),
+                        ))
+                    })
+                    .into_any_element()
+            });
+        }
+        if capturing && capture_slot.is_none() {
+            shortcut_list = shortcut_list.child(h_row().gap(px(10.)).child(listening()).child(cancel("cancel-add")));
+        } else if !desktop_shortcut {
+            shortcut_list = shortcut_list.child(
+                icon_label_button("add-shortcut", I::Plus, "Add shortcut", ButtonKind::Ghost, p)
+                    .when(!hotkeys_ok, |el| el.opacity(0.5))
+                    .on_click(record(None)),
+            );
+        }
 
         let activation = segmented(
             "activation",
@@ -188,17 +208,27 @@ impl SettingsView {
                     vec![
                         v_col()
                             .child(row(
-                                "Dictation shortcut",
+                                "Dictation shortcuts",
                                 Some(if desktop_shortcut {
-                                    "Managed by your desktop's shortcut settings. Allow direct keyboard access in Setup to use modifier-only shortcuts."
+                                    "Managed by your desktop's shortcut settings. Allow direct keyboard access in Setup to use modifier-only shortcuts, mouse buttons and more than one shortcut."
                                 } else {
                                     MODIFIER_ONLY_HINT
                                 }),
-                                recorder,
+                                shortcut_list,
                                 p,
                             ))
                             .when_some(capture_error, |el, e| {
                                 el.child(div().px(px(18.)).pb(px(12.)).text_size(px(12.5)).text_color(p.danger).child(e))
+                            })
+                            .when(mouse_hint, |el| {
+                                el.child(
+                                    div()
+                                        .px(px(18.))
+                                        .pb(px(12.))
+                                        .text_size(px(12.5))
+                                        .text_color(p.text_muted)
+                                        .child("On Linux the mouse button also reaches the app you're in, so pick one it doesn't use (a side button may also go back in a browser)."),
+                                )
                             })
                             .when(globe_hint, |el| {
                                 el.child(

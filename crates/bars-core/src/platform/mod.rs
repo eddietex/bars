@@ -181,12 +181,12 @@ pub enum Hotkeys {
 }
 
 impl Hotkeys {
-    pub fn start(kind: HotkeyBackendKind, chord: Chord, events: Sender<HotkeyEvent>) -> Hotkeys {
+    pub fn start(kind: HotkeyBackendKind, chords: Vec<Chord>, events: Sender<HotkeyEvent>) -> Hotkeys {
         #[cfg(target_os = "linux")]
         {
             let mut errors = Vec::new();
             if matches!(kind, HotkeyBackendKind::Auto | HotkeyBackendKind::Direct) {
-                match linux::evdev_hotkeys::EvdevHotkeys::spawn(chord.clone(), events.clone()) {
+                match linux::evdev_hotkeys::EvdevHotkeys::spawn(chords.clone(), events.clone()) {
                     Ok(h) => return Hotkeys::Evdev(h),
                     Err(e) => {
                         log::info!("direct hotkeys unavailable: {e:#}");
@@ -197,6 +197,8 @@ impl Hotkeys {
             // The portal is only used when chosen (onboarding offers it), so
             // the desktop never shows shortcut dialogs the user didn't ask for.
             if kind == HotkeyBackendKind::Portal {
+                // The desktop binds one shortcut, of keys.
+                let chord = chords.into_iter().find(|c| c.mouse_button().is_none()).unwrap_or_default();
                 match linux::portal::PortalHotkeys::spawn(chord, events) {
                     Ok(h) => return Hotkeys::Portal(h),
                     Err(e) => {
@@ -213,7 +215,7 @@ impl Hotkeys {
         #[cfg(target_os = "windows")]
         {
             let _ = kind;
-            return match win::hotkeys::WinHotkeys::spawn(chord, events) {
+            return match win::hotkeys::WinHotkeys::spawn(chords, events) {
                 Ok(h) => Hotkeys::Windows(h),
                 Err(e) => Hotkeys::None(format!("{e:#}")),
             };
@@ -221,14 +223,14 @@ impl Hotkeys {
         #[cfg(target_os = "macos")]
         {
             let _ = kind;
-            return match mac::hotkeys::MacHotkeys::spawn(chord, events) {
+            return match mac::hotkeys::MacHotkeys::spawn(chords, events) {
                 Ok(h) => Hotkeys::Mac(h),
                 Err(e) => Hotkeys::None(format!("{e:#}")),
             };
         }
         #[allow(unreachable_code)]
         {
-            let _ = (kind, chord, events);
+            let _ = (kind, chords, events);
             Hotkeys::None("global hotkeys are not implemented on this platform yet".into())
         }
     }
@@ -280,16 +282,16 @@ impl Hotkeys {
         }
     }
 
-    pub fn set_chord(&self, chord: Chord) {
+    pub fn set_chords(&self, chords: Vec<Chord>) {
         match self {
             #[cfg(target_os = "linux")]
-            Hotkeys::Evdev(h) => h.set_chord(chord),
+            Hotkeys::Evdev(h) => h.set_chords(chords),
             #[cfg(target_os = "windows")]
-            Hotkeys::Windows(h) => h.set_chord(chord),
+            Hotkeys::Windows(h) => h.set_chords(chords),
             #[cfg(target_os = "macos")]
-            Hotkeys::Mac(h) => h.set_chord(chord),
+            Hotkeys::Mac(h) => h.set_chords(chords),
             _ => {
-                let _ = chord;
+                let _ = chords;
             }
         }
     }

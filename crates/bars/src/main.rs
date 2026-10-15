@@ -39,7 +39,7 @@ gpui_kit::assets::icon_assets!(
     AppIcons,
     [
         House, Keyboard, AudioLines, BookA, ListClock, ShieldCheck, X, Check, Copy, Trash, Sparkles,
-        ArrowRight, Search, ChevronsUpDown, CircleCheck, CircleAlert, Zap, Mic, Pencil
+        ArrowRight, Search, ChevronsUpDown, CircleCheck, CircleAlert, Zap, Mic, Pencil, Plus
     ]
 );
 
@@ -203,9 +203,10 @@ fn main() {
             let shell = cx.new(|cx| Shell::new(state.clone(), shell_rx, shell_tx.clone(), cx));
             let launch = if background { Launch::Background } else { Launch::Interactive };
             shell.update(cx, |s, cx| s.startup(launch, cx));
-            // Dev/test helper: start recording a new shortcut right away.
+            // Dev/test helper: start recording a shortcut (in place of the
+            // first) right away.
             if std::env::var_os("BARS_DEV_CAPTURE").is_some() {
-                state.update(cx, |s, cx| s.start_capture(cx));
+                state.update(cx, |s, cx| s.start_capture(Some(0), cx));
             }
             // Keep the shell alive for the life of the app.
             std::mem::forget(shell);

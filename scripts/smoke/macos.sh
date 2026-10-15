@@ -69,7 +69,7 @@ app=$!
 sleep 10
 smoke/post-keys ctrl+shift+40 150   # 40 = K
 sleep 2
-grep -q "shortcut set to Ctrl+Shift+K" smoke/shortcut.log \
+grep -q "shortcuts set to Ctrl+Shift+K" smoke/shortcut.log \
   || { echo "recording a new shortcut did not work"; cat smoke/shortcut.log; exit 1; }
 grep -q 'Ctrl+Shift+K' "$HOME/Library/Application Support/bars/config.toml" \
   || { echo "the new shortcut was not saved"; exit 1; }

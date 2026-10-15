@@ -287,7 +287,7 @@ impl Controller {
         let (polish_tx, polish_rx) = unbounded();
         let polisher = Polisher::spawn(polish_tx);
         let (hotkey_tx, hotkey_rx) = unbounded();
-        let hotkeys = Hotkeys::start(cfg.hotkey.backend, cfg.hotkey.chord.clone(), hotkey_tx.clone());
+        let hotkeys = Hotkeys::start(cfg.hotkey.backend, cfg.hotkey.chords.clone(), hotkey_tx.clone());
         let (internal_tx, internal_rx) = unbounded();
         let watch_generation = Arc::new(AtomicU64::new(0));
         let inserter = spawn_inserter(ui.clone(), &hotkeys, internal_tx.clone(), watch_generation.clone());
@@ -485,6 +485,7 @@ impl Controller {
         platform::requirements::Context {
             hotkey_backend: self.hotkeys.backend_name(),
             prefers_portal: self.cfg.hotkey.backend == crate::config::HotkeyBackendKind::Portal,
+            uses_mouse: uses_mouse(&self.cfg),
         }
     }
 
@@ -573,10 +574,8 @@ impl Controller {
                 let was_tap = from_timer;
                 self.cancel_recording(!was_tap);
                 if was_tap && self.cfg.hotkey.activation == Activation::HoldOrDoubleTap {
-                    self.notice(
-                        NoticeKind::Info,
-                        format!("Hold {} to talk · double-tap for hands-free", self.cfg.hotkey.chord),
-                    );
+                    let shortcut = self.cfg.hotkey.first().map_or_else(|| "the shortcut".into(), Chord::label);
+                    self.notice(NoticeKind::Info, format!("Hold {shortcut} to talk · double-tap for hands-free"));
                 }
             }
         }
@@ -959,7 +958,7 @@ impl Controller {
         if !self.hotkeys.is_active() || want_direct {
             let next = Hotkeys::start(
                 self.cfg.hotkey.backend,
-                self.cfg.hotkey.chord.clone(),
+                self.cfg.hotkey.chords.clone(),
                 self.hotkey_tx.clone(),
             );
             if next.is_active() || !self.hotkeys.is_active() {
@@ -973,19 +972,26 @@ impl Controller {
         self.emit_hotkey_status();
     }
 
-    fn apply_config(&mut self, new: Config) {
+    fn apply_config(&mut self, mut new: Config) {
+        // Whatever the change, a shortcut stays.
+        new.hotkey.keep_a_shortcut();
         let old = std::mem::replace(&mut self.cfg, new);
         if self.cfg.hotkey.backend != old.hotkey.backend {
             self.hotkeys =
-                Hotkeys::start(self.cfg.hotkey.backend, self.cfg.hotkey.chord.clone(), self.hotkey_tx.clone());
+                Hotkeys::start(self.cfg.hotkey.backend, self.cfg.hotkey.chords.clone(), self.hotkey_tx.clone());
             self.sync_hotkeys_recording();
             self.inserter = spawn_inserter(self.ui.clone(), &self.hotkeys, self.internal_tx.clone(), self.watch_generation.clone());
             self.bound_trigger = None;
             self.emit_hotkey_status();
             self.emit_permissions();
-        } else if self.cfg.hotkey.chord != old.hotkey.chord {
-            log::info!("shortcut set to {}", self.cfg.hotkey.chord);
-            self.hotkeys.set_chord(self.cfg.hotkey.chord.clone());
+        } else if self.cfg.hotkey.chords != old.hotkey.chords {
+            let all: Vec<String> = self.cfg.hotkey.chords.iter().map(Chord::to_string).collect();
+            log::info!("shortcuts set to {}", all.join(", "));
+            self.hotkeys.set_chords(self.cfg.hotkey.chords.clone());
+            // Linux: a mouse-button shortcut needs the mice readable.
+            if uses_mouse(&self.cfg) != uses_mouse(&old) {
+                self.emit_permissions();
+            }
         }
         let cfg = &self.cfg;
         if cfg.hotkey.activation != old.hotkey.activation {
@@ -1180,6 +1186,11 @@ impl Controller {
         }
         self.emit(Event::Config(Box::new(self.cfg.clone())));
     }
+}
+
+/// Some shortcut is a mouse button.
+fn uses_mouse(c: &Config) -> bool {
+    c.hotkey.chords.iter().any(|c| c.mouse_button().is_some())
 }
 
 /// Whether anything reads the focused app or field.
