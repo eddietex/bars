@@ -6,7 +6,7 @@ members = ["crates/bars-core", "crates/bars"]
 version = "0.5.0"
 edition = "2024"
 license = "MIT"
-authors = ["Chris Hink <chris@hink.xyz>"]
+authors = ["Chris Hinkley <chris@hink.xyz>"]
 
 [profile.release]
 lto = "thin"
