@@ -128,6 +128,8 @@ pub struct AudioConfig {
     pub keep_warm: bool,
     pub sounds: bool,
     pub sound_volume: f32,
+    /// Mute other audio while dictating (see `platform::mute`).
+    pub mute_others: bool,
 }
 
 impl Default for AudioConfig {
@@ -137,6 +139,7 @@ impl Default for AudioConfig {
             keep_warm: false,
             sounds: true,
             sound_volume: 0.35,
+            mute_others: false,
         }
     }
 }

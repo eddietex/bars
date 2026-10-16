@@ -7,6 +7,7 @@ pub mod linux;
 #[cfg(target_os = "macos")]
 pub mod mac;
 pub mod focus;
+pub mod mute;
 #[cfg(any(target_os = "windows", target_os = "macos"))]
 mod native_doctor;
 #[cfg(any(target_os = "windows", target_os = "macos"))]

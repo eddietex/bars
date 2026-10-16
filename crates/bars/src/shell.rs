@@ -467,7 +467,7 @@ impl Shell {
                 _ => s.check_for_updates(true, cx),
             }),
             ShellCommand::Quit => {
-                state.send(Command::Shutdown);
+                state.controller.shutdown();
                 cx.quit();
             }
         }

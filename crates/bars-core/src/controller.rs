@@ -10,7 +10,7 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use chrono::Local;
-use crossbeam_channel::{Receiver, Sender, select, unbounded};
+use crossbeam_channel::{Receiver, Sender, bounded, select, unbounded};
 
 use crate::audio::{Audio, Cue};
 use crate::config::{Config, InsertionConfig, Replacement, Suggestion};
@@ -21,6 +21,7 @@ use crate::learn::{self, Heard, Pieces, Tracker, Verdict};
 use crate::models;
 use crate::paths;
 use crate::platform::focus::{self, Focus};
+use crate::platform::mute::{self, Muter};
 use crate::platform::{self, Hotkeys, Injector, Inserted, Permissions};
 use crate::polish::{self, Part, PolishEvent, PolishStatus, Polisher};
 use crate::segment::{self, Segmenter};
@@ -133,20 +134,33 @@ pub type EventSender = async_channel::Sender<Event>;
 #[derive(Clone)]
 pub struct ControllerHandle {
     tx: Sender<Command>,
+    /// Closes when the controller has stopped.
+    done: Receiver<()>,
 }
 
 impl ControllerHandle {
     pub fn send(&self, cmd: Command) {
         let _ = self.tx.send(cmd);
     }
+
+    /// Stops the controller, giving it a moment to finish (turning other
+    /// audio back on, say) before the app quits.
+    pub fn shutdown(&self) {
+        self.send(Command::Shutdown);
+        let _ = self.done.recv_timeout(Duration::from_secs(1));
+    }
 }
 
 pub fn spawn(config: Config, ui: EventSender) -> ControllerHandle {
     let (tx, rx) = unbounded();
-    let handle = ControllerHandle { tx: tx.clone() };
+    let (done_tx, done) = bounded::<()>(0);
+    let handle = ControllerHandle { tx: tx.clone(), done };
     thread::Builder::new()
         .name("bars-controller".into())
-        .spawn(move || Controller::new(config, ui).run(rx))
+        .spawn(move || {
+            Controller::new(config, ui).run(rx);
+            drop(done_tx);
+        })
         .expect("spawn controller");
     handle
 }
@@ -221,6 +235,9 @@ enum InsertJob {
     RememberTarget,
 }
 
+/// How long a sound cue takes to be heard: its tones, and the output's
+/// latency. Where muting silences Bars' sounds too, it waits this long.
+const CUE_HEARD: Duration = Duration::from_millis(400);
 /// How long insertion waits for the focused field to be read.
 const FOCUS_TIMEOUT: Duration = Duration::from_millis(400);
 /// While recording, how often to look for a piece of a long dictation to
@@ -255,6 +272,9 @@ struct Controller {
     engine_rx: Receiver<EngineEvent>,
     polisher: Polisher,
     polish_rx: Receiver<PolishEvent>,
+    muter: Muter,
+    /// Other audio is muted (or about to be) for the recording.
+    muting: bool,
     polish_status: PolishStatus,
     hotkeys: Hotkeys,
     hotkey_rx: Receiver<HotkeyEvent>,
@@ -338,6 +358,8 @@ impl Controller {
             engine,
             engine_rx,
             polisher,
+            muter: Muter::spawn(),
+            muting: false,
             polish_rx,
             polish_status: PolishStatus::Off,
             hotkeys,
@@ -428,6 +450,7 @@ impl Controller {
                 recv(rx) -> cmd => match cmd {
                     Ok(Command::Shutdown) | Err(_) => {
                         self.audio.cancel();
+                        self.unmute_others();
                         return;
                     }
                     Ok(cmd) => self.on_command(cmd),
@@ -460,8 +483,11 @@ impl Controller {
             }
             if self.start_cue_at.is_some_and(|t| now >= t) {
                 self.start_cue_at = None;
-                if matches!(self.phase, Phase::Recording { .. }) && self.cfg.audio.sounds {
-                    self.audio.cue(Cue::Start, self.cfg.audio.sound_volume);
+                if matches!(self.phase, Phase::Recording { .. }) {
+                    if self.cfg.audio.sounds {
+                        self.audio.cue(Cue::Start, self.cfg.audio.sound_volume);
+                    }
+                    self.mute_others(self.cfg.audio.sounds);
                 }
             }
             if self.hotkey_access_check_at().is_some_and(|t| now >= t) {
@@ -606,8 +632,15 @@ impl Controller {
                 if let Phase::Recording { .. } = self.phase {
                     self.start_cue_at = None;
                     self.set_phase(Phase::Recording { locked: true });
-                    if self.cfg.audio.sounds {
+                    let sounds = self.cfg.audio.sounds;
+                    if sounds && mute::MUTES_OWN_SOUNDS {
+                        self.unmute_others();
+                    }
+                    if sounds {
                         self.audio.cue(Cue::Lock, self.cfg.audio.sound_volume);
+                    }
+                    if !self.muting {
+                        self.mute_others(sounds);
                     }
                 }
             }
@@ -660,6 +693,7 @@ impl Controller {
         }
         self.audio.cancel();
         self.drop_recording();
+        self.unmute_others();
         let long_enough = self
             .recording_since
             .is_some_and(|t| t.elapsed() > Duration::from_millis(400));
@@ -679,6 +713,7 @@ impl Controller {
         self.recognizer.reset();
         self.start_cue_at = None;
         self.recording_since = None;
+        self.unmute_others();
         let Some(rec) = self.audio.stop() else {
             self.drop_recording();
             self.notice(NoticeKind::Error, "Couldn't finish the recording");
@@ -718,6 +753,22 @@ impl Controller {
             self.engine.transcribe(id, rec.samples, rec.rate, self.cfg.model.language.clone());
         }
         self.set_phase(Phase::Transcribing);
+    }
+
+    /// Mutes other audio while recording, if that's on: once the sound
+    /// just played (if `cue`) has been heard.
+    fn mute_others(&mut self, cue: bool) {
+        if self.cfg.audio.mute_others {
+            self.muter.mute(if cue && mute::MUTES_OWN_SOUNDS { CUE_HEARD } else { Duration::ZERO });
+            self.muting = true;
+        }
+    }
+
+    /// Turns other audio back on (before a sound plays).
+    fn unmute_others(&mut self) {
+        if std::mem::take(&mut self.muting) {
+            self.muter.restore();
+        }
     }
 
     /// The recording ends without a dictation.

@@ -5,5 +5,6 @@
 pub mod clipboard;
 pub mod hotkeys;
 pub mod keycodes;
+pub mod mute;
 pub mod permissions;
 pub mod uia;

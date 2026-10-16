@@ -31,6 +31,14 @@ the app doesn't use. Say **"new line"** or **"new paragraph"** to break lines; f
 ("um", "uh") are removed; the Dictionary page holds word replacements and
 spoken snippets.
 
+*Mute other audio* (off by default, under Microphone) silences music, videos
+and other apps while you dictate, and turns them back on when you stop.
+Windows and Linux mute each app but Bars, so its sounds still play; macOS
+14.2 and later do the same with a Core Audio tap, and older versions mute
+the output instead, which an output without a mute or volume control (most
+audio interfaces) doesn't allow. Only what Bars muted is turned back on,
+and if Bars crashes meanwhile, its next start turns it back on.
+
 Bars reads the text around the cursor through the accessibility API, to add
 a space only where one is needed, continue a sentence in lowercase and drop
 the full stop when the sentence carries on (on Linux this works in apps with
@@ -231,7 +239,8 @@ crates/bars-core   engine, audio, hotkeys, text injection, config, history
                       Automation), mac/ (event tap, pasteboard, accessibility,
                       TCC permissions), native_inject.rs (Windows/macOS paste
                       + typing), paste.rs (paste-and-confirm, shared),
-                      focus.rs (focused app and field text)
+                      focus.rs (focused app and field text), mute.rs
+                      (muting other audio while dictating)
 crates/bars        GPUI app: tray, overlay pill, settings window
   src/overlay_native.rs  Windows/macOS pill: click-through, active screen, blur (macOS)
   src/ipc_*.rs          single instance + CLI (D-Bus on Linux, local socket elsewhere)

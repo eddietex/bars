@@ -6,6 +6,7 @@ pub mod ax;
 pub mod hotkeys;
 pub mod keycodes;
 pub mod main_thread;
+pub mod mute;
 pub mod paste;
 pub mod permissions;
 pub mod secure_input;

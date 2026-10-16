@@ -308,6 +308,19 @@ impl SettingsView {
                             p,
                         )
                         .into_any_element(),
+                        row(
+                            "Mute other audio",
+                            Some("Silences music, videos and other apps while you dictate, and turns them back on after."),
+                            small_switch("mute-others", cfg.audio.mute_others, {
+                                let set = set.clone();
+                                move |v, _, cx| {
+                                    let v = *v;
+                                    set(cx, Box::new(move |c| c.audio.mute_others = v))
+                                }
+                            }),
+                            p,
+                        )
+                        .into_any_element(),
                     ],
                 )),
             )

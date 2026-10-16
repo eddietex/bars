@@ -5,6 +5,7 @@ pub mod evdev_hotkeys;
 pub mod inject;
 pub mod keycodes;
 pub mod keymap;
+pub mod mute;
 pub mod permissions;
 pub mod portal;
 
