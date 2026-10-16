@@ -483,7 +483,7 @@ impl SettingsView {
                     vec![
                         row(
                             "Check for updates automatically",
-                            Some("Once a day, Bars fetches a small file from GitHub to see whether a newer version is out. Nothing else is sent, and nothing is installed until you choose to update."),
+                            Some("When it starts and every 24 hours while it runs, Bars fetches a small file from GitHub to see whether a newer version is out. Nothing else is sent, and nothing is installed until you choose to update."),
                             small_switch("check-updates", cfg.ui.check_updates, {
                                 let set = set.clone();
                                 move |v, _, cx| {

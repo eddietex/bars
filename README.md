@@ -66,8 +66,9 @@ own, loses most of what you said or takes too long is dropped, and the
 dictation goes in as heard. Output polish is on by default, downloads during
 setup and can be turned off on the Models page.
 
-Once a day Bars looks for a newer version: it fetches a small file
-(`latest.json`) from the latest GitHub release, and sends nothing else. It
+When it starts and every 24 hours while it runs (sleep included), Bars
+looks for a newer version: it fetches a small file (`latest.json`) from
+the latest GitHub release, and sends nothing else. It
 only tells you, with a notification and in the tray menu; nothing is
 installed until you choose Update (tray menu, settings, or `bars --update`).
 On macOS and Windows that downloads the new version, checks its signature,

@@ -41,10 +41,11 @@ pub enum Launch {
 const SETUP_NOTIFICATION: &str = "bars-setup";
 const UPDATE_NOTIFICATION: &str = "bars-update";
 const POLISH_NOTIFICATION: &str = "bars-polish";
-/// How often to look for a newer Bars (when allowed), and how long after
-/// starting to look first.
-const UPDATE_EVERY: Duration = Duration::from_secs(24 * 60 * 60);
+/// How long after starting to look for a newer Bars (when allowed), and how
+/// often to see whether it's time to look again (every 24 hours by the
+/// clock, which keeps going while the computer sleeps; timers don't).
 const UPDATE_FIRST: Duration = Duration::from_secs(60);
+const UPDATE_TICK: Duration = Duration::from_secs(10 * 60);
 
 /// Lets any view ask the shell for something (open a window, etc).
 pub struct ShellSender(pub async_channel::Sender<ShellCommand>);
@@ -232,19 +233,20 @@ impl Shell {
         })
         .detach();
 
-        // Look for a newer Bars once a day, when allowed.
+        // Look for a newer Bars soon after starting, then every 24 hours
+        // while running, when allowed.
         cx.spawn(async move |this, cx| {
             cx.background_executor().timer(UPDATE_FIRST).await;
             loop {
                 let alive = this.update(cx, |this, cx| {
                     if this.state.read(cx).config.ui.check_updates {
-                        this.state.update(cx, |s, cx| s.check_for_updates(false, cx));
+                        this.state.update(cx, |s, cx| s.check_for_updates_if_due(cx));
                     }
                 });
                 if alive.is_err() {
                     break;
                 }
-                cx.background_executor().timer(UPDATE_EVERY).await;
+                cx.background_executor().timer(UPDATE_TICK).await;
             }
         })
         .detach();

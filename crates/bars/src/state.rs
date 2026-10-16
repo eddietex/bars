@@ -2,7 +2,7 @@
 //! source of truth; this entity renders its events and forwards edits back.
 
 use std::collections::{HashMap, HashSet};
-use std::time::Instant;
+use std::time::{Duration, Instant, SystemTime};
 
 use gpui_kit::*;
 use bars_core::audio::{self, InputDevice};
@@ -111,7 +111,16 @@ pub struct AppState {
     /// The newest version already announced, so a daily check doesn't
     /// announce it again.
     update_announced: Option<String>,
+    /// When looking for an update last worked, and was last tried. By the
+    /// clock: the time a computer sleeps counts too.
+    update_checked: Option<SystemTime>,
+    update_tried: Option<SystemTime>,
 }
+
+/// How often Bars looks for a newer version while it's running, and how
+/// soon it tries again when it couldn't.
+const UPDATE_EVERY: Duration = Duration::from_secs(24 * 60 * 60);
+const UPDATE_RETRY: Duration = Duration::from_secs(60 * 60);
 
 impl EventEmitter<StateEvent> for AppState {}
 
@@ -152,6 +161,8 @@ impl AppState {
             }),
             update: UpdateStatus::Unknown,
             update_announced: None,
+            update_checked: None,
+            update_tried: None,
         }
     }
 
@@ -162,11 +173,15 @@ impl AppState {
         if matches!(self.update, UpdateStatus::Checking | UpdateStatus::Installing(_)) {
             return;
         }
+        self.update_tried = Some(SystemTime::now());
         self.update = UpdateStatus::Checking;
         cx.notify();
         cx.spawn(async move |this, cx| {
             let result = cx.background_executor().spawn(async { update::check() }).await;
             let _ = this.update(cx, |s, cx| {
+                if result.is_ok() {
+                    s.update_checked = Some(SystemTime::now());
+                }
                 match result {
                     Ok(Some(release)) => {
                         log::info!("Bars {} is available", release.version);
@@ -195,6 +210,17 @@ impl AppState {
             });
         })
         .detach();
+    }
+
+    /// Looks for an update if 24 hours have passed since the last look (an
+    /// hour, if it failed), or there hasn't been one yet.
+    pub fn check_for_updates_if_due(&mut self, cx: &mut Context<Self>) {
+        let now = SystemTime::now();
+        // A time in the future (the clock was set back) counts as long ago.
+        let waited = |since: Option<SystemTime>, wait: Duration| since.and_then(|t| now.duration_since(t).ok()).is_none_or(|d| d >= wait);
+        if waited(self.update_checked, UPDATE_EVERY) && waited(self.update_tried, UPDATE_RETRY) {
+            self.check_for_updates(false, cx);
+        }
     }
 
     /// Installs the available update, or opens the release page where this
