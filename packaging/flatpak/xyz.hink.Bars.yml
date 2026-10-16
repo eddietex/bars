@@ -50,6 +50,7 @@ modules:
       - install -Dm755 target/release/bars /app/bin/bars
       - install -Dm644 packaging/linux/xyz.hink.Bars.desktop /app/share/applications/xyz.hink.Bars.desktop
       - install -Dm644 packaging/linux/xyz.hink.Bars.metainfo.xml /app/share/metainfo/xyz.hink.Bars.metainfo.xml
+      - install -Dm644 -t /app/share/licenses/xyz.hink.Bars LICENSE THIRD_PARTY_NOTICES.txt
       - |
         for size in 32 48 64 128 256 512; do
           install -Dm644 packaging/linux/icons/${size}x${size}/xyz.hink.Bars.png \

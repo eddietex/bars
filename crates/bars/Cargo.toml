@@ -58,6 +58,8 @@ authors = ["Chris Hinkley"]
 publisher = "Chris Hinkley"
 category = "Productivity"
 license-file = "../../LICENSE"
+# In the app's resources (macOS) and next to bars.exe (Windows).
+resources = ["../../LICENSE", "../../THIRD_PARTY_NOTICES.txt"]
 out-dir = "../../dist"
 binaries-dir = "../../target/release"
 binaries = [{ path = "bars", main = true }]

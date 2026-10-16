@@ -98,7 +98,7 @@ jobs:
           cp packaging/linux/xyz.hink.Bars.metainfo.xml $dir/share/metainfo/
           cp -r packaging/linux/icons $dir/share/icons
           cp packaging/linux/70-bars.rules $dir/udev/
-          cp README.md LICENSE $dir/
+          cp README.md LICENSE THIRD_PARTY_NOTICES.txt $dir/
           tar czf $dir.tar.gz $dir
       - uses: actions/upload-artifact@v4
         with:

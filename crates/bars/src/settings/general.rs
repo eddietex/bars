@@ -199,6 +199,10 @@ impl SettingsView {
             }
         });
         let version = format!("ver. {}", env!("CARGO_PKG_VERSION"));
+        let notices_button = button("notices", "View", ButtonKind::Secondary, p).on_click({
+            let state = state.clone();
+            move |_, _, cx| state.read(cx).send(Command::OpenUrl(third_party_notices()))
+        });
 
         v_col()
             .child(page_header("Shortcut & input", Some("How you start dictating and where the words go."), p))
@@ -495,8 +499,38 @@ impl SettingsView {
                         )
                         .into_any_element(),
                         row(&version, Some(&update_status), update_button, p).into_any_element(),
+                        row(
+                            "Open-source licenses",
+                            Some("Bars is MIT-licensed, and built on open-source software by many others."),
+                            notices_button,
+                            p,
+                        )
+                        .into_any_element(),
                     ],
                 )),
             )
+    }
+}
+
+/// The licenses of the software Bars is built from: the copy installed with
+/// it, or else the one published with this version.
+fn third_party_notices() -> String {
+    const NAME: &str = "THIRD_PARTY_NOTICES.txt";
+    let installed = std::env::current_exe().ok().and_then(|exe| {
+        let dir = exe.parent()?.to_path_buf();
+        // Next to the program (Windows), in the app's resources (macOS), in
+        // the tarball's top folder, or with the Flatpak's licenses.
+        [
+            dir.join(NAME),
+            dir.join("../Resources").join(NAME),
+            dir.join("..").join(NAME),
+            dir.join("../share/licenses/xyz.hink.Bars").join(NAME),
+        ]
+        .into_iter()
+        .find(|p| p.is_file())
+    });
+    match installed {
+        Some(path) => path.display().to_string(),
+        None => format!("https://github.com/hink/bars/blob/v{}/{NAME}", env!("CARGO_PKG_VERSION")),
     }
 }
