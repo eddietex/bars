@@ -46,6 +46,9 @@ pub(crate) trait Backend {
     /// Unmutes what an earlier run muted and didn't unmute, where it's
     /// still muted.
     fn recover(&mut self, muted: &[Muted]);
+    /// Gets ready to mute: asks for any permission that takes (macOS), so
+    /// the question comes when muting is turned on, not in a dictation.
+    fn prepare(&mut self) {}
 }
 
 fn backend() -> Option<Box<dyn Backend>> {
@@ -60,6 +63,7 @@ fn backend() -> Option<Box<dyn Backend>> {
 }
 
 enum Cmd {
+    Prepare,
     Mute { after: Duration },
     Restore(Sender<()>),
 }
@@ -79,6 +83,11 @@ impl Muter {
             .spawn(move || run(rx, file))
             .expect("spawn mute thread");
         Muter { tx }
+    }
+
+    /// Gets ready to mute (asking macOS for permission, if it takes that).
+    pub fn prepare(&self) {
+        let _ = self.tx.send(Cmd::Prepare);
     }
 
     /// Mutes other audio, `after` this long (a sound playing first).
@@ -124,6 +133,11 @@ fn run_with(rx: Receiver<Cmd>, file: &Path, mut backend: Box<dyn Backend>) {
             None => rx.recv().map_err(|_| RecvTimeoutError::Disconnected),
         };
         match cmd {
+            Ok(Cmd::Prepare) => {
+                if due.is_none() {
+                    backend.prepare();
+                }
+            }
             Ok(Cmd::Mute { after }) => {
                 due = Some(Instant::now() + after);
             }

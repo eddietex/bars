@@ -1,7 +1,8 @@
 //! macOS: mutes every other app with a Core Audio process tap (macOS 14.2
-//! and later), which works on any output. Without one, it mutes the output
-//! device, or turns down an output without a mute control; an output with
-//! neither (most audio interfaces, displays over HDMI) can't be muted then.
+//! and later), which works on any output and takes the "System Audio
+//! Recording" permission. Without one, it mutes the output device, or
+//! turns down an output without a mute control; an output with neither
+//! (most audio interfaces, displays over HDMI) can't be muted then.
 
 use std::ffi::c_void;
 use std::ptr::{NonNull, null};
@@ -27,7 +28,7 @@ const CHANNELS: [u32; 2] = [1, 2];
 #[derive(Default)]
 pub struct Output {
     /// The tap muting every other app, while it's on.
-    tap: Option<AudioObjectID>,
+    tap: Option<tap::Tap>,
     /// No tap this time: the output is muted instead.
     no_tap: bool,
     /// Devices seen since the last unmute (muted or not, they're left be).
@@ -102,6 +103,17 @@ impl Backend for Output {
         self.seen.clear();
     }
 
+    /// Makes (and removes) a tap, so macOS asks for the permission it
+    /// takes now, the first time, rather than in a dictation. Starting
+    /// to read one waits for the answer. (Whether the user said no can't be
+    /// told: the tap is made either way, and doesn't mute then.)
+    fn prepare(&mut self) {
+        match tap::create() {
+            Ok(t) => tap::destroy(t),
+            Err(e) => log::info!("no process tap ({e})"),
+        }
+    }
+
     fn recover(&mut self, muted: &[Muted]) {
         for m in muted {
             let Some(device) = device_for_uid(&m.id) else { continue };
@@ -148,21 +160,47 @@ fn mute_device(device: AudioObjectID) -> Vec<How> {
     }
 }
 
-/// Core Audio process taps, looked up when used: they're new in macOS 14.2,
-/// and Bars runs on older versions too.
+/// Core Audio process taps (looked up when used: they're new in macOS 14.2,
+/// and Bars runs on older versions too). A tap mutes the apps it taps only
+/// while it's being read, so it goes in a private aggregate device whose
+/// input is read and dropped. Reading it is what macOS asks permission for
+/// ("System Audio Recording"), once.
 mod tap {
-    use std::ffi::{c_int, c_void};
+    use std::ffi::{CStr, c_int, c_void};
+    use std::ptr::{NonNull, null, null_mut};
     use std::sync::OnceLock;
+    use std::sync::atomic::{AtomicU32, Ordering};
 
+    use core_foundation::array::CFArray;
+    use core_foundation::base::{CFType, TCFType};
+    use core_foundation::boolean::CFBoolean;
+    use core_foundation::dictionary::CFDictionary;
+    use core_foundation::string::{CFString, CFStringRef};
     use objc2::AnyThread;
     use objc2::runtime::AnyClass;
-    use objc2_core_audio::{AudioObjectID, CATapDescription, CATapMuteBehavior, kAudioHardwarePropertyTranslatePIDToProcessObject};
+    use objc2_core_audio::{
+        AudioDeviceCreateIOProcID, AudioDeviceDestroyIOProcID, AudioDeviceIOProcID, AudioDeviceStart, AudioDeviceStop,
+        AudioHardwareCreateAggregateDevice, AudioHardwareDestroyAggregateDevice, AudioObjectID, CATapDescription,
+        CATapMuteBehavior, kAudioAggregateDeviceIsPrivateKey, kAudioAggregateDeviceIsStackedKey,
+        kAudioAggregateDeviceMainSubDeviceKey, kAudioAggregateDeviceNameKey, kAudioAggregateDeviceSubDeviceListKey,
+        kAudioAggregateDeviceTapAutoStartKey, kAudioAggregateDeviceTapListKey, kAudioAggregateDeviceUIDKey,
+        kAudioHardwarePropertyTranslatePIDToProcessObject, kAudioSubDeviceUIDKey, kAudioSubTapDriftCompensationKey,
+        kAudioSubTapUIDKey, kAudioTapPropertyUID,
+    };
+    use objc2_core_audio_types::{AudioBufferList, AudioTimeStamp};
     use objc2_foundation::{NSArray, NSNumber, NSString};
 
-    use super::{MAIN, address, get, kAudioObjectPropertyScopeGlobal, kAudioObjectSystemObject};
+    use super::{MAIN, address, default_output, get, kAudioObjectPropertyScopeGlobal, kAudioObjectSystemObject, uid};
 
     type Create = unsafe extern "C" fn(*const c_void, *mut AudioObjectID) -> i32;
     type Destroy = unsafe extern "C" fn(AudioObjectID) -> i32;
+
+    /// A tap muting every app but Bars, and the device reading it.
+    pub(super) struct Tap {
+        tap: AudioObjectID,
+        device: AudioObjectID,
+        io: AudioDeviceIOProcID,
+    }
 
     fn functions() -> Option<(Create, Destroy)> {
         static FUNCTIONS: OnceLock<Option<(Create, Destroy)>> = OnceLock::new();
@@ -178,9 +216,43 @@ mod tap {
         })
     }
 
-    /// A tap muting every app's audio but Bars' own.
-    pub(super) fn create() -> Result<AudioObjectID, String> {
-        let (create, _) = functions().ok_or("macOS before 14.2")?;
+    pub(super) fn create() -> Result<Tap, String> {
+        let (create, destroy) = functions().ok_or("macOS before 14.2")?;
+        let tap = create_tap(create)?;
+        match read(tap) {
+            Ok((device, io)) => Ok(Tap { tap, device, io }),
+            Err(e) => {
+                // SAFETY: the tap just made.
+                unsafe { destroy(tap) };
+                Err(e)
+            }
+        }
+    }
+
+    pub(super) fn destroy(t: Tap) {
+        // SAFETY: the device and I/O proc this module made, then the tap.
+        unsafe {
+            AudioDeviceStop(t.device, t.io);
+            AudioDeviceDestroyIOProcID(t.device, t.io);
+            AudioHardwareDestroyAggregateDevice(t.device);
+        }
+        if let Some((_, destroy)) = functions() {
+            // SAFETY: a tap this process made.
+            let status = unsafe { destroy(t.tap) };
+            if status != 0 {
+                log::warn!("couldn't remove the process tap {}: {status}", t.tap);
+            }
+        }
+    }
+
+    impl std::fmt::Display for Tap {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            write!(f, "tap {} read by device {}", self.tap, self.device)
+        }
+    }
+
+    /// A tap on every app's audio but Bars' own, muting it.
+    fn create_tap(create: Create) -> Result<AudioObjectID, String> {
         let pid = std::process::id() as c_int;
         let at = address(kAudioHardwarePropertyTranslatePIDToProcessObject, kAudioObjectPropertyScopeGlobal, MAIN);
         let own: Vec<_> = get(kAudioObjectSystemObject as AudioObjectID, at, Some(&pid), 0).filter(|p| *p != 0).map(NSNumber::new_u32).into_iter().collect();
@@ -195,18 +267,75 @@ mod tap {
             create(objc2::rc::Retained::as_ptr(&description).cast(), &mut tap)
         };
         if status != 0 || tap == 0 {
-            return Err(format!("status {status}"));
+            return Err(format!("no tap: {status}"));
         }
         Ok(tap)
     }
 
-    pub(super) fn destroy(tap: AudioObjectID) {
-        let Some((_, destroy)) = functions() else { return };
-        // SAFETY: a tap this process created.
-        let status = unsafe { destroy(tap) };
-        if status != 0 {
-            log::warn!("couldn't remove the process tap {tap}: {status}");
+    /// A private aggregate device on `tap`, clocked by the output, read
+    /// (and dropped) until it's stopped.
+    fn read(tap: AudioObjectID) -> Result<(AudioObjectID, AudioDeviceIOProcID), String> {
+        static MADE: AtomicU32 = AtomicU32::new(0);
+        let key = |k: &CStr| CFString::new(k.to_str().unwrap_or_default());
+        let at = address(kAudioTapPropertyUID, kAudioObjectPropertyScopeGlobal, MAIN);
+        let tap_uid = get::<CFStringRef, ()>(tap, at, None, null()).filter(|u| !u.is_null()).ok_or("the tap has no uid")?;
+        // SAFETY: the property hands over a retained CFString.
+        let tap_uid = unsafe { CFString::wrap_under_create_rule(tap_uid) };
+        let tap_entry = CFDictionary::from_CFType_pairs(&[
+            (key(kAudioSubTapUIDKey), tap_uid.as_CFType()),
+            (key(kAudioSubTapDriftCompensationKey), CFBoolean::true_value().as_CFType()),
+        ]);
+        let name = format!("xyz.hink.Bars.mute.{}.{}", std::process::id(), MADE.fetch_add(1, Ordering::Relaxed));
+        let mut pairs: Vec<(CFString, CFType)> = vec![
+            (key(kAudioAggregateDeviceNameKey), CFString::new("Bars: other audio muted").as_CFType()),
+            (key(kAudioAggregateDeviceUIDKey), CFString::new(&name).as_CFType()),
+            (key(kAudioAggregateDeviceIsPrivateKey), CFBoolean::true_value().as_CFType()),
+            (key(kAudioAggregateDeviceIsStackedKey), CFBoolean::false_value().as_CFType()),
+            (key(kAudioAggregateDeviceTapAutoStartKey), CFBoolean::true_value().as_CFType()),
+            (key(kAudioAggregateDeviceTapListKey), CFArray::from_CFTypes(&[tap_entry]).as_CFType()),
+        ];
+        if let Some(output) = default_output().and_then(uid) {
+            let output = CFString::new(&output);
+            let sub = CFDictionary::from_CFType_pairs(&[(key(kAudioSubDeviceUIDKey), output.as_CFType())]);
+            pairs.push((key(kAudioAggregateDeviceMainSubDeviceKey), output.as_CFType()));
+            pairs.push((key(kAudioAggregateDeviceSubDeviceListKey), CFArray::from_CFTypes(&[sub]).as_CFType()));
         }
+        let description = CFDictionary::from_CFType_pairs(&pairs);
+        let mut device = 0;
+        let mut io: AudioDeviceIOProcID = None;
+        // SAFETY: a CFDictionary, the core-foundation crate's and objc2's
+        // being the same type; the out-pointers are live.
+        unsafe {
+            let status = AudioHardwareCreateAggregateDevice(&*description.as_concrete_TypeRef().cast(), NonNull::from(&mut device));
+            if status != 0 || device == 0 {
+                return Err(format!("no aggregate device: {status}"));
+            }
+            let status = AudioDeviceCreateIOProcID(device, Some(drop_audio), null_mut(), NonNull::from(&mut io));
+            if status != 0 {
+                AudioHardwareDestroyAggregateDevice(device);
+                return Err(format!("no I/O proc: {status}"));
+            }
+            let status = AudioDeviceStart(device, io);
+            if status != 0 {
+                AudioDeviceDestroyIOProcID(device, io);
+                AudioHardwareDestroyAggregateDevice(device);
+                return Err(format!("the device didn't start: {status}"));
+            }
+        }
+        Ok((device, io))
+    }
+
+    /// Reads the tapped audio, and drops it.
+    unsafe extern "C-unwind" fn drop_audio(
+        _device: AudioObjectID,
+        _now: NonNull<AudioTimeStamp>,
+        _input: NonNull<AudioBufferList>,
+        _input_time: NonNull<AudioTimeStamp>,
+        _output: NonNull<AudioBufferList>,
+        _output_time: NonNull<AudioTimeStamp>,
+        _client: *mut c_void,
+    ) -> i32 {
+        0
     }
 }
 

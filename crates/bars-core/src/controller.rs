@@ -1255,6 +1255,9 @@ impl Controller {
         if reads_focus(cfg) && !reads_focus(&old) {
             platform::prepare_focus_reading();
         }
+        if cfg.audio.mute_others && !old.audio.mute_others {
+            self.muter.prepare();
+        }
         if let Err(e) = self.cfg.save(&paths::config_file()) {
             self.notice(NoticeKind::Error, format!("Couldn't save settings: {e:#}"));
         }

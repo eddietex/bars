@@ -34,8 +34,10 @@ spoken snippets.
 *Mute other audio* (off by default, under Microphone) silences music, videos
 and other apps while you dictate, and turns them back on when you stop.
 Windows and Linux mute each app but Bars, so its sounds still play; macOS
-14.2 and later do the same with a Core Audio tap, and older versions mute
-the output instead, which an output without a mute or volume control (most
+14.2 and later do the same with a Core Audio tap, which takes the System
+Audio Recording permission (macOS asks when you turn the option on; Bars
+reads the tap only to mute it, and never records). Older versions mute the
+output instead, which an output without a mute or volume control (most
 audio interfaces) doesn't allow. Only what Bars muted is turned back on,
 and if Bars crashes meanwhile, its next start turns it back on.
 

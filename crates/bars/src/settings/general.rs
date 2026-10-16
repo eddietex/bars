@@ -314,7 +314,11 @@ impl SettingsView {
                         .into_any_element(),
                         row(
                             "Mute other audio",
-                            Some("Silences music, videos and other apps while you dictate, and turns them back on after."),
+                            Some(if cfg!(target_os = "macos") {
+                                "Silences music, videos and other apps while you dictate, and turns them back on after. This takes System Audio Recording, which macOS asks for when you turn it on (or see Privacy & Security); Bars never records."
+                            } else {
+                                "Silences music, videos and other apps while you dictate, and turns them back on after."
+                            }),
                             small_switch("mute-others", cfg.audio.mute_others, {
                                 let set = set.clone();
                                 move |v, _, cx| {
