@@ -17,7 +17,7 @@ fn main() {
     let t = std::time::Instant::now();
     audio.start(None, false);
     std::thread::sleep(Duration::from_secs_f32(secs));
-    let rec = audio.stop();
+    let rec = audio.stop().unwrap_or_default();
     println!(
         "captured {:.2}s of 16 kHz audio in {:.2}s wall; peak {:.3}; loudest-100ms rms {:.4}; level updates {}",
         rec.duration().as_secs_f32(), t.elapsed().as_secs_f32(), rec.peak, rec.loudest_window_rms(), updates.load(Ordering::Relaxed)

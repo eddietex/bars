@@ -141,21 +141,23 @@ pub fn list_input_devices() -> Vec<InputDevice> {
     out
 }
 
-/// A finished recording: 16 kHz mono samples.
+/// A finished recording: mono samples at the microphone's rate (the
+/// speech engine converts them to 16 kHz, off the controller's thread).
 #[derive(Clone, Debug, Default)]
 pub struct Recording {
     pub samples: Vec<f32>,
+    pub rate: u32,
     pub peak: f32,
 }
 
 impl Recording {
     pub fn duration(&self) -> Duration {
-        Duration::from_secs_f64(self.samples.len() as f64 / SAMPLE_RATE as f64)
+        Duration::from_secs_f64(self.samples.len() as f64 / self.rate.max(1) as f64)
     }
 
     /// RMS of the loudest 100 ms window; a cheap "did anyone speak" signal.
     pub fn loudest_window_rms(&self) -> f32 {
-        let win = (SAMPLE_RATE / 10) as usize;
+        let win = (self.rate / 10).max(1) as usize;
         self.samples
             .chunks(win)
             .map(|c| (c.iter().map(|s| s * s).sum::<f32>() / c.len().max(1) as f32).sqrt())
@@ -193,6 +195,7 @@ struct Shared {
 #[derive(Clone)]
 pub struct Audio {
     tx: Sender<Cmd>,
+    shared: Arc<Mutex<Shared>>,
 }
 
 pub type LevelSink = Arc<dyn Fn(f32) + Send + Sync>;
@@ -202,21 +205,33 @@ impl Audio {
     /// while recording (drives the overlay waveform).
     pub fn spawn(levels: LevelSink) -> Audio {
         let (tx, rx) = unbounded();
+        let thread = AudioThread::new(levels);
+        let shared = thread.shared.clone();
         thread::Builder::new()
             .name("bars-audio".into())
-            .spawn(move || AudioThread::new(levels).run(rx))
+            .spawn(move || thread.run(rx))
             .expect("spawn audio thread");
-        Audio { tx }
+        Audio { tx, shared }
     }
 
     pub fn start(&self, device: Option<String>, warm: bool) {
         let _ = self.tx.send(Cmd::Start { device, warm });
     }
 
-    pub fn stop(&self) -> Recording {
+    /// Ends the recording. None if the audio thread didn't answer.
+    pub fn stop(&self) -> Option<Recording> {
         let (tx, rx) = bounded(1);
         let _ = self.tx.send(Cmd::Stop(tx));
-        rx.recv_timeout(Duration::from_secs(3)).unwrap_or_default()
+        rx.recv_timeout(Duration::from_secs(3)).ok()
+    }
+
+    /// While recording: what was recorded from sample `from` on (at the
+    /// microphone's rate), and that rate. A long dictation is transcribed
+    /// piece by piece this way while it's being made.
+    pub fn peek(&self, from: usize) -> (Vec<f32>, u32) {
+        let s = self.shared.lock();
+        let new = if s.capturing { s.buf.get(from..).map(<[f32]>::to_vec).unwrap_or_default() } else { Vec::new() };
+        (new, s.rate)
     }
 
     pub fn cancel(&self) {
@@ -328,12 +343,7 @@ impl AudioThread {
         if !self.warm {
             self.stream = None;
         }
-        let samples = if rate == SAMPLE_RATE {
-            raw
-        } else {
-            resample(&raw, rate, SAMPLE_RATE)
-        };
-        Recording { samples, peak }
+        Recording { samples: raw, rate, peak }
     }
 
     fn ensure_stream(&mut self, device: Option<String>) -> anyhow::Result<()> {
@@ -521,7 +531,89 @@ fn pick_config(dev: &cpal::Device) -> anyhow::Result<(StreamConfig, SampleFormat
 }
 
 /// Windowed-sinc resampler (Blackman-Harris), good enough for ASR input.
+/// The filter's taps depend only on where an output sample falls between
+/// two input samples, and with whole-number rates there are only so many
+/// such places (one for 48 kHz to 16 kHz, 160 for 44.1 kHz), so they're
+/// worked out once: a minute of audio takes milliseconds, not a second.
 pub fn resample(input: &[f32], from: u32, to: u32) -> Vec<f32> {
+    if from == to || input.is_empty() {
+        return input.to_vec();
+    }
+    let g = gcd(from, to);
+    // Output n sits at input position n * down / up.
+    let (up, down) = ((to / g) as usize, (from / g) as usize);
+    if up > 1024 {
+        return resample_direct(input, from, to);
+    }
+    let ratio = to as f64 / from as f64;
+    let cutoff = ratio.min(1.0) * 0.95;
+    let half = (16.0 / cutoff).ceil() as usize;
+    let width = 2 * half;
+    // taps[phase * width + j] weighs input (center + 1 - half + j).
+    let mut taps = vec![0f32; up * width];
+    for phase in 0..up {
+        let frac = phase as f64 / up as f64;
+        for j in 0..width {
+            let x = frac - (j as f64 + 1.0 - half as f64);
+            taps[phase * width + j] = filter_tap(x, cutoff, half) as f32;
+        }
+        let row = &mut taps[phase * width..(phase + 1) * width];
+        let sum: f32 = row.iter().sum();
+        if sum.abs() > 1e-9 {
+            row.iter_mut().for_each(|t| *t /= sum);
+        }
+    }
+    let out_len = (input.len() as f64 * ratio).floor() as usize;
+    let mut out = Vec::with_capacity(out_len);
+    for n in 0..out_len {
+        let pos = n * down;
+        let (center, phase) = (pos / up, pos % up);
+        let row = &taps[phase * width..(phase + 1) * width];
+        let first = center as isize + 1 - half as isize;
+        if first >= 0 && first as usize + width <= input.len() {
+            let window = &input[first as usize..first as usize + width];
+            out.push(window.iter().zip(row).map(|(a, b)| a * b).sum());
+        } else {
+            // At the edges, only the taps that land on input, renormalized.
+            let (mut acc, mut wsum) = (0f32, 0f32);
+            for (j, t) in row.iter().enumerate() {
+                let k = first + j as isize;
+                if k >= 0 && (k as usize) < input.len() {
+                    acc += input[k as usize] * t;
+                    wsum += t;
+                }
+            }
+            out.push(if wsum.abs() > 1e-9 { acc / wsum } else { 0.0 });
+        }
+    }
+    out
+}
+
+fn gcd(a: u32, b: u32) -> u32 {
+    if b == 0 { a } else { gcd(b, a % b) }
+}
+
+/// The filter's weight for an input sample `x` input samples away.
+fn filter_tap(x: f64, cutoff: f64, half: usize) -> f64 {
+    let sinc = if x.abs() < 1e-9 {
+        1.0
+    } else {
+        let a = std::f64::consts::PI * x * cutoff;
+        a.sin() / a
+    };
+    let w_pos = (x / half as f64 + 1.0) / 2.0;
+    let w = if (0.0..=1.0).contains(&w_pos) {
+        let p = 2.0 * std::f64::consts::PI * w_pos;
+        0.35875 - 0.48829 * p.cos() + 0.14128 * (2.0 * p).cos() - 0.01168 * (3.0 * p).cos()
+    } else {
+        0.0
+    };
+    sinc * w
+}
+
+/// The same filter computed tap by tap: for rates without a small common
+/// ratio (and to check the fast path against).
+fn resample_direct(input: &[f32], from: u32, to: u32) -> Vec<f32> {
     if from == to || input.is_empty() {
         return input.to_vec();
     }
@@ -540,21 +632,7 @@ pub fn resample(input: &[f32], from: u32, to: u32) -> Vec<f32> {
             if k < 0 || k >= n_in {
                 continue;
             }
-            let x = t - k as f64;
-            let sinc = if x.abs() < 1e-9 {
-                1.0
-            } else {
-                let a = std::f64::consts::PI * x * cutoff;
-                a.sin() / a
-            };
-            let w_pos = (x / half_taps as f64 + 1.0) / 2.0;
-            let w = if (0.0..=1.0).contains(&w_pos) {
-                let p = 2.0 * std::f64::consts::PI * w_pos;
-                0.35875 - 0.48829 * p.cos() + 0.14128 * (2.0 * p).cos() - 0.01168 * (3.0 * p).cos()
-            } else {
-                0.0
-            };
-            let c = sinc * w;
+            let c = filter_tap(t - k as f64, cutoff, half_taps as usize);
             acc += input[k as usize] as f64 * c;
             wsum += c;
         }
@@ -614,5 +692,17 @@ mod tests {
             })
             .fold(0.0, f32::max);
         assert!(err < 0.02, "max error {err}");
+    }
+
+    #[test]
+    fn fast_resampling_matches_the_filter() {
+        for from in [48_000, 44_100, 22_050, 8_000] {
+            let input: Vec<f32> = (0..from / 2).map(|i| ((i as f32) * 0.37).sin() * 0.3 + ((i as f32) * 0.05).cos() * 0.2).collect();
+            let fast = resample(&input, from, SAMPLE_RATE);
+            let direct = resample_direct(&input, from, SAMPLE_RATE);
+            assert_eq!(fast.len(), direct.len(), "{from}");
+            let err = fast.iter().zip(&direct).map(|(a, b)| (a - b).abs()).fold(0.0, f32::max);
+            assert!(err < 1e-4, "{from}: {err}");
+        }
     }
 }

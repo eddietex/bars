@@ -22,7 +22,8 @@ use crate::models;
 use crate::paths;
 use crate::platform::focus::{self, Focus};
 use crate::platform::{self, Hotkeys, Injector, Inserted, Permissions};
-use crate::polish::{self, PolishEvent, PolishStatus, Polisher};
+use crate::polish::{self, Part, PolishEvent, PolishStatus, Polisher};
+use crate::segment::{self, Segmenter};
 use crate::text::{self, TextProcessor};
 
 /// Requests from the UI (or tray, D-Bus, CLI).
@@ -167,6 +168,31 @@ struct Recording {
     id: u64,
     focus: Option<Receiver<Focus>>,
     prepared: bool,
+    /// Cuts a long dictation into pieces as it's recorded.
+    segmenter: Option<Segmenter>,
+    /// Samples of the recording looked at so far.
+    seen: usize,
+}
+
+/// A long dictation, transcribed (and polished) piece by piece while it
+/// was being recorded (see `segment`).
+#[derive(Default)]
+struct Parts {
+    /// Each piece sent to the engine, as it comes back.
+    pieces: Vec<Piece>,
+    /// Pieces passed on (to the polisher, or just counted), in order.
+    passed: usize,
+    /// The recording ended (all pieces are sent), and when.
+    finished: Option<Instant>,
+    /// The pieces go through the polisher (decided at the first).
+    polished: bool,
+}
+
+enum Piece {
+    Waiting,
+    Heard(Transcript),
+    /// The engine failed on it: it adds nothing.
+    Lost,
 }
 
 /// Where insertion finds what had focus.
@@ -197,6 +223,9 @@ enum InsertJob {
 
 /// How long insertion waits for the focused field to be read.
 const FOCUS_TIMEOUT: Duration = Duration::from_millis(400);
+/// While recording, how often to look for a piece of a long dictation to
+/// transcribe (see `segment`).
+const SPLIT_EVERY: Duration = Duration::from_millis(300);
 /// After a dictation goes in, its field is re-read this often, for this
 /// long, to see corrections.
 const WATCH_EVERY: Duration = Duration::from_secs(1);
@@ -244,6 +273,12 @@ struct Controller {
     /// Models waiting to download after it.
     download_queue: VecDeque<String>,
     recording: Option<Recording>,
+    /// When the recording was last looked at for a piece to transcribe.
+    split_checked: Instant,
+    /// Long dictations in pieces, by dictation.
+    parts: HashMap<u64, Parts>,
+    /// Engine requests for pieces: the dictation and which piece.
+    part_of: HashMap<u64, (u64, usize)>,
     capturing: bool,
     mic_testing: bool,
     bound_trigger: Option<String>,
@@ -317,6 +352,9 @@ impl Controller {
             downloading: None,
             download_queue: VecDeque::new(),
             recording: None,
+            split_checked: Instant::now(),
+            parts: HashMap::new(),
+            part_of: HashMap::new(),
             capturing: false,
             mic_testing: false,
             bound_trigger: None,
@@ -378,6 +416,7 @@ impl Controller {
                 self.start_cue_at,
                 self.hotkey_access_check_at(),
                 self.secure_input_check_at(),
+                self.split_check_at(),
             ]
                 .into_iter()
                 .flatten()
@@ -427,6 +466,9 @@ impl Controller {
             }
             if self.hotkey_access_check_at().is_some_and(|t| now >= t) {
                 self.check_hotkey_access(now);
+            }
+            if self.split_check_at().is_some_and(|t| now >= t) {
+                self.split_recording(now);
             }
             if self.secure_input_check_at().is_some_and(|t| now >= t) {
                 self.check_secure_input(now);
@@ -602,7 +644,8 @@ impl Controller {
         if let Some(focus) = focus.take_if(|_| prepared) {
             self.polisher.prepare(id, focus);
         }
-        self.recording = Some(Recording { id, focus, prepared });
+        self.recording = Some(Recording { id, focus, prepared, segmenter: None, seen: 0 });
+        self.split_checked = Instant::now();
         self.recording_since = Some(Instant::now());
         log::info!("dictation started");
         // Delay the start sound slightly: chords that turn out to be part of
@@ -636,7 +679,12 @@ impl Controller {
         self.recognizer.reset();
         self.start_cue_at = None;
         self.recording_since = None;
-        let rec = self.audio.stop();
+        let Some(rec) = self.audio.stop() else {
+            self.drop_recording();
+            self.notice(NoticeKind::Error, "Couldn't finish the recording");
+            self.set_phase(if self.pending.is_empty() { Phase::Idle } else { Phase::Transcribing });
+            return;
+        };
         if self.cfg.audio.sounds {
             self.audio.cue(Cue::Stop, self.cfg.audio.sound_volume);
         }
@@ -654,20 +702,144 @@ impl Controller {
             self.set_phase(if self.pending.is_empty() { Phase::Idle } else { Phase::Transcribing });
             return;
         }
-        let Recording { id, focus, prepared } = self.recording.take().unwrap_or_else(|| {
+        let Recording { id, focus, prepared, segmenter, .. } = self.recording.take().unwrap_or_else(|| {
             self.next_request += 1;
-            Recording { id: self.next_request - 1, focus: None, prepared: false }
+            Recording { id: self.next_request - 1, focus: None, prepared: false, segmenter: None, seen: 0 }
         });
         self.pending.insert(id, Pending { audio_secs: secs, focus, prepared, transcript: None });
-        self.engine.transcribe(id, rec.samples, self.cfg.model.language.clone());
+        if self.parts.contains_key(&id) {
+            // A long dictation: only the rest is left to transcribe.
+            let segmenter = segmenter.unwrap_or_else(|| Segmenter::new(rec.rate));
+            self.send_piece(id, segmenter.last(&rec.samples), rec.rate);
+            if let Some(parts) = self.parts.get_mut(&id) {
+                parts.finished = Some(Instant::now());
+            }
+        } else {
+            self.engine.transcribe(id, rec.samples, rec.rate, self.cfg.model.language.clone());
+        }
         self.set_phase(Phase::Transcribing);
     }
 
     /// The recording ends without a dictation.
     fn drop_recording(&mut self) {
-        if let Some(r) = self.recording.take().filter(|r| r.prepared) {
-            self.polisher.forget(r.id);
+        if let Some(r) = self.recording.take() {
+            let polishing = self.parts.remove(&r.id).is_some_and(|p| p.polished);
+            if r.prepared || polishing {
+                self.polisher.forget(r.id);
+            }
         }
+    }
+
+    /// While recording, when to next look for a piece to transcribe.
+    fn split_check_at(&self) -> Option<Instant> {
+        (self.recording.is_some() && matches!(self.phase, Phase::Recording { .. })).then(|| self.split_checked + SPLIT_EVERY)
+    }
+
+    /// Hands any finished piece of a long dictation to the engine, so it's
+    /// transcribed while the user goes on talking.
+    fn split_recording(&mut self, now: Instant) {
+        self.split_checked = now;
+        let Some(rec) = self.recording.as_mut() else { return };
+        let (new, rate) = self.audio.peek(rec.seen);
+        rec.seen += new.len();
+        let segmenter = rec.segmenter.get_or_insert_with(|| Segmenter::new(rate));
+        let mut cut = Vec::new();
+        let mut next = segmenter.push(&new);
+        while let Some(piece) = next {
+            cut.push(piece);
+            next = segmenter.push(&[]);
+        }
+        let id = rec.id;
+        for piece in cut {
+            self.send_piece(id, piece, rate);
+        }
+    }
+
+    fn send_piece(&mut self, id: u64, piece: segment::Piece, rate: u32) {
+        let request = self.next_request;
+        self.next_request += 1;
+        let parts = self.parts.entry(id).or_default();
+        self.part_of.insert(request, (id, parts.pieces.len()));
+        parts.pieces.push(Piece::Waiting);
+        log::info!("transcribing piece {} of a long dictation", parts.pieces.len());
+        self.engine.transcribe_piece(request, piece, rate, self.cfg.model.language.clone());
+    }
+
+    /// A piece came back from the engine (None: it failed). Pieces are
+    /// passed on in order; once the recording ended and all are back, the
+    /// dictation is put together.
+    fn on_piece(&mut self, id: u64, index: usize, heard: Option<Transcript>) {
+        let Some(parts) = self.parts.get_mut(&id) else { return };
+        if let Some(slot) = parts.pieces.get_mut(index) {
+            *slot = heard.map_or(Piece::Lost, Piece::Heard);
+        }
+        while let Some(piece) = self.parts.get(&id).and_then(|p| p.pieces.get(p.passed)) {
+            if matches!(piece, Piece::Waiting) {
+                break;
+            }
+            let text = match piece {
+                Piece::Heard(t) => t.text.clone(),
+                _ => String::new(),
+            };
+            self.pass_piece(id, text);
+        }
+        let Some(parts) = self.parts.get(&id) else { return };
+        if parts.finished.is_none() || parts.passed < parts.pieces.len() {
+            return;
+        }
+        let Some(parts) = self.parts.remove(&id) else { return };
+        if parts.pieces.iter().any(|p| matches!(p, Piece::Lost)) {
+            self.notice(NoticeKind::Warning, "Part of the dictation couldn't be transcribed");
+        }
+        let t = put_together(id, parts.pieces, parts.finished);
+        if parts.polished {
+            // The polisher has the last piece; it finishes the dictation.
+            if let Some(p) = self.pending.get_mut(&id) {
+                p.transcript = Some(t);
+            }
+        } else if let Some(p) = self.pending.remove(&id) {
+            self.deliver(t, p.audio_secs, None, Field::Reading(p.focus));
+        }
+    }
+
+    /// Passes the next piece of a long dictation on: to the polisher when
+    /// the dictation is being polished (decided at its first piece).
+    fn pass_piece(&mut self, id: u64, text: String) {
+        let first = self.parts.get(&id).is_some_and(|p| p.passed == 0);
+        let prepared = match &self.recording {
+            Some(r) if r.id == id => r.prepared,
+            _ => self.pending.get(&id).is_some_and(|p| p.prepared),
+        };
+        let polishing = self.polishing();
+        let polish = polishing && !text.trim().is_empty() && self.is_english(&text);
+        let Some(parts) = self.parts.get_mut(&id) else { return };
+        if first {
+            parts.polished = polishing || prepared;
+        }
+        let index = parts.passed;
+        parts.passed += 1;
+        if !parts.polished {
+            return;
+        }
+        let last = parts.finished.is_some() && parts.passed == parts.pieces.len();
+        // The field (when not read ahead) goes with the first piece.
+        let focus = if first && !prepared {
+            match self.recording.as_mut() {
+                Some(r) if r.id == id => r.focus.take(),
+                _ => self.pending.get_mut(&id).and_then(|p| p.focus.take()),
+            }
+        } else {
+            None
+        };
+        log::debug!("polishing piece {} of a long dictation", index + 1);
+        self.polisher.polish(polish::Job {
+            request: id,
+            text,
+            polish,
+            focus,
+            prepared: first && prepared,
+            part: if last { Part::Last } else { Part::Next },
+        });
     }
 
     fn on_engine(&mut self, ev: EngineEvent) {
@@ -678,6 +850,11 @@ impl Controller {
                 self.emit(Event::LearningAvailable(self.pieces.is_some()));
             }
             EngineEvent::Failed { request, error } => {
+                if let Some((id, index)) = self.part_of.remove(&request) {
+                    log::warn!("a piece of a long dictation couldn't be transcribed: {error}");
+                    self.on_piece(id, index, None);
+                    return;
+                }
                 if self.pending.remove(&request).is_some_and(|p| p.prepared) {
                     self.polisher.forget(request);
                 }
@@ -685,6 +862,10 @@ impl Controller {
                 self.settle_phase();
             }
             EngineEvent::Done(t) => {
+                if let Some((id, index)) = self.part_of.remove(&t.request) {
+                    self.on_piece(id, index, Some(t));
+                    return;
+                }
                 if !self.pending.contains_key(&t.request) {
                     return;
                 }
@@ -701,6 +882,7 @@ impl Controller {
                         polish,
                         focus: p.focus.take(),
                         prepared: p.prepared,
+                        part: Part::Whole,
                     });
                     p.transcript = Some(t);
                     return;
@@ -1185,6 +1367,29 @@ impl Controller {
             self.notice(NoticeKind::Error, format!("Couldn't save settings: {e:#}"));
         }
         self.emit(Event::Config(Box::new(self.cfg.clone())));
+    }
+}
+
+/// One transcript from the pieces of a long dictation: their words in
+/// order, and as the time it took, what was left after the recording ended.
+fn put_together(id: u64, pieces: Vec<Piece>, finished: Option<Instant>) -> Transcript {
+    let heard: Vec<Transcript> = pieces
+        .into_iter()
+        .filter_map(|p| match p {
+            Piece::Heard(t) => Some(t),
+            _ => None,
+        })
+        .collect();
+    let text = heard.iter().map(|t| t.text.trim()).filter(|t| !t.is_empty()).collect::<Vec<_>>().join(" ");
+    // Learning needs every piece's word confidences, or none.
+    let words = heard.iter().map(|t| t.heard.clone()).collect::<Option<Vec<_>>>().map(|w| w.concat());
+    Transcript {
+        request: id,
+        text,
+        audio_secs: heard.iter().map(|t| t.audio_secs).sum(),
+        infer_ms: finished.map_or(0, |f| f.elapsed().as_millis() as u64),
+        model: heard.first().map(|t| t.model.clone()).unwrap_or_default(),
+        heard: words,
     }
 }
 

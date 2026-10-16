@@ -79,6 +79,16 @@ All models run locally on the CPU (int8 ONNX). Measured on an 11 s clip:
 Models download from Hugging Face on first run into
 `~/.local/share/bars/models` (Flatpak: `~/.var/app/xyz.hink.Bars/data`).
 
+Long dictations are transcribed while you talk. Once one is 12 seconds
+long, Bars cuts it in the next pause (without one, at the quietest moment
+before 28 seconds) and the model transcribes that piece in the background.
+It hears a few seconds either side of the piece, so a sentence that runs on
+past a cut is punctuated as one, and keeps only the words within it. Each
+piece is polished as it comes, after the text before it. When you stop,
+only the last piece is left: on an M4 Pro, 48 seconds of speech goes in
+0.3 s after you stop instead of 1.2 s. The text still goes into the app in
+one go, and shorter dictations are never cut.
+
 ### Polish model
 
 [Spokenly Cleanup 1](https://huggingface.co/spokenly/cleanup-1) by Spokenly
@@ -210,6 +220,7 @@ crates/bars-core   engine, audio, hotkeys, text injection, config, history
   src/hotkey.rs       chords + push-to-talk/double-tap recognizer (tested)
   src/engine.rs       model worker thread (transcribe-rs / ONNX Runtime)
   src/audio.rs        cpal capture (PulseAudio/PipeWire), resampling, cues
+  src/segment.rs      cutting long dictations at pauses while you talk (tested)
   src/text.rs         filler removal, dictionary, snippets, voice commands
   src/learn.rs        learning dictionary words from corrections (tested)
   src/polish.rs       polish: Spokenly Cleanup 1 on llama.cpp, and the checks

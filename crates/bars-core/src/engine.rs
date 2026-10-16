@@ -1,6 +1,7 @@
 //! The speech engine: owns the loaded model on a dedicated thread and serves
 //! transcription requests in order.
 
+use std::ops::Range;
 use std::path::Path;
 use std::sync::Arc;
 use std::thread;
@@ -11,10 +12,11 @@ use crossbeam_channel::{Receiver, RecvTimeoutError, Sender, unbounded};
 use transcribe_rs::onnx::Quantization;
 use transcribe_rs::onnx::canary::CanaryModel;
 use transcribe_rs::onnx::parakeet::ParakeetModel;
-use transcribe_rs::{SpeechModel, TranscribeOptions};
+use transcribe_rs::{SpeechModel, TranscribeOptions, TranscriptionResult, TranscriptionSegment};
 
 use crate::learn::{self, Heard, Pieces};
 use crate::models::{self, Family, ModelInfo};
+use crate::segment::Piece;
 
 #[derive(Clone, Debug, PartialEq)]
 pub enum EngineStatus {
@@ -50,7 +52,9 @@ pub enum EngineEvent {
 
 enum Cmd {
     Select { id: String, threads: Option<usize>, idle_unload: Option<Duration> },
-    Transcribe { request: u64, samples: Vec<f32>, language: Option<String> },
+    /// `keep`: only the words heard there (a piece of a longer recording
+    /// and the audio around it).
+    Transcribe { request: u64, samples: Vec<f32>, rate: u32, keep: Option<Range<usize>>, language: Option<String> },
     Unload,
 }
 
@@ -80,10 +84,27 @@ impl Engine {
         });
     }
 
-    pub fn transcribe(&self, request: u64, samples: Vec<f32>, language: Option<String>) {
+    /// Transcribes mono `samples` recorded at `rate` (converted to 16 kHz
+    /// here, on the engine's thread).
+    pub fn transcribe(&self, request: u64, samples: Vec<f32>, rate: u32, language: Option<String>) {
         let _ = self.tx.send(Cmd::Transcribe {
             request,
             samples,
+            rate,
+            keep: None,
+            language,
+        });
+    }
+
+    /// Transcribes a piece of a long recording: the words heard within it,
+    /// with the audio around it heard too, so its first and last words
+    /// are taken as the middle of a sentence where they are.
+    pub fn transcribe_piece(&self, request: u64, piece: Piece, rate: u32, language: Option<String>) {
+        let _ = self.tx.send(Cmd::Transcribe {
+            request,
+            samples: piece.samples,
+            rate,
+            keep: Some(piece.keep),
             language,
         });
     }
@@ -107,17 +128,24 @@ impl Model {
         }
     }
 
-    /// The words of the last transcription, with confidences.
-    fn heard(&mut self) -> Option<Vec<Heard>> {
+    /// The words of the last transcription, with confidences: all of
+    /// them, or those of the tokens `kept`.
+    fn heard(&mut self, kept: Option<&[bool]>) -> Option<Vec<Heard>> {
         let Model::Parakeet(m) = self else { return None };
         let record = m.take_decode()?;
+        if kept.is_some_and(|k| k.len() != record.tokens.len()) {
+            return None;
+        }
         let vocab = m.vocab();
-        let tokens: Vec<&str> = record
+        let (tokens, probs): (Vec<&str>, Vec<f32>) = record
             .tokens
             .iter()
-            .map(|&t| vocab.get(t as usize).map_or("", String::as_str))
-            .collect();
-        Some(learn::heard_words(&tokens, &record.probs))
+            .zip(&record.probs)
+            .enumerate()
+            .filter(|(i, _)| kept.is_none_or(|k| k[*i]))
+            .map(|(_, (&t, &p))| (vocab.get(t as usize).map_or("", String::as_str), p))
+            .unzip();
+        Some(learn::heard_words(&tokens, &probs))
     }
 }
 
@@ -180,17 +208,25 @@ impl Worker {
                         let _ = self.ensure_loaded();
                     }
                 }
-                Cmd::Transcribe { request, samples, language } => {
-                    let result = self.ensure_loaded().and_then(|()| self.run_one(&samples, language));
+                Cmd::Transcribe { request, samples, rate, keep, language } => {
+                    // In seconds, open-ended at the recording's start and end.
+                    let secs = |i: usize| i as f32 / rate as f32;
+                    let span = keep.as_ref().map(|k| {
+                        let start = if k.start == 0 { f32::NEG_INFINITY } else { secs(k.start) };
+                        let end = if k.end >= samples.len() { f32::INFINITY } else { secs(k.end) };
+                        start..end
+                    });
+                    let audio_secs = secs(keep.map_or(samples.len(), |k| k.len()));
+                    let samples = crate::audio::resample(&samples, rate, crate::audio::SAMPLE_RATE);
+                    let result = self.ensure_loaded().and_then(|()| self.run_piece(&samples, span, language));
                     self.last_used = Instant::now();
                     match result {
-                        Ok((text, infer_ms)) => {
+                        Ok((text, heard, infer_ms)) => {
                             let model = self.loaded.as_ref().map(|l| l.id.clone()).unwrap_or_default();
-                            let heard = self.loaded.as_mut().and_then(|l| l.model.heard());
                             let _ = self.events.send(EngineEvent::Done(Transcript {
                                 request,
                                 text,
-                                audio_secs: samples.len() as f32 / crate::audio::SAMPLE_RATE as f32,
+                                audio_secs,
                                 infer_ms,
                                 model,
                                 heard,
@@ -233,7 +269,7 @@ impl Worker {
                 // Warm-up pass: the first inference pays for allocator/kernel
                 // setup; do it now instead of on the user's first dictation.
                 let _ = model.speech().transcribe(&vec![0.0; 16_000], &TranscribeOptions::default());
-                let _ = model.heard();
+                let _ = model.heard(None);
                 let pieces = match &model {
                     Model::Parakeet(m) => Some(Arc::new(Pieces::from_vocab(m.vocab()))),
                     Model::Other(_) => None,
@@ -259,7 +295,31 @@ impl Worker {
         }
     }
 
-    fn run_one(&mut self, samples: &[f32], language: Option<String>) -> anyhow::Result<(String, u64)> {
+    /// Transcribes `samples`, keeping the words that begin within `span`
+    /// (seconds into them) if given: its text, words heard and time taken.
+    fn run_piece(&mut self, samples: &[f32], span: Option<Range<f32>>, language: Option<String>) -> anyhow::Result<(String, Option<Vec<Heard>>, u64)> {
+        let timed = matches!(self.loaded.as_ref().map(|l| &l.model), Some(Model::Parakeet(_)));
+        let (result, ms) = match &span {
+            // Without word timings, the piece on its own.
+            Some(span) if !timed => {
+                let at = |t: f32| ((t.max(0.0) * crate::audio::SAMPLE_RATE as f32) as usize).min(samples.len());
+                self.run_one(&samples[at(span.start)..at(span.end).max(at(span.start))], language)?
+            }
+            _ => self.run_one(samples, language)?,
+        };
+        let model = &mut self.loaded.as_mut().ok_or_else(|| anyhow!("model not loaded"))?.model;
+        let tokens = result.segments.as_deref().filter(|_| timed);
+        let (text, heard) = match (span, tokens) {
+            (Some(span), Some(tokens)) => {
+                let (text, kept) = words_within(tokens, &span);
+                (text, model.heard(Some(&kept)))
+            }
+            _ => (result.text.trim().to_string(), model.heard(None)),
+        };
+        Ok((text, heard, ms))
+    }
+
+    fn run_one(&mut self, samples: &[f32], language: Option<String>) -> anyhow::Result<(TranscriptionResult, u64)> {
         let loaded = self.loaded.as_mut().ok_or_else(|| anyhow!("model not loaded"))?;
         let started = Instant::now();
         let options = TranscribeOptions {
@@ -295,8 +355,39 @@ impl Worker {
                 log::info!("heard nothing at first; heard it with more silence around it");
             }
         }
-        Ok((result.text.trim().to_string(), started.elapsed().as_millis() as u64))
+        Ok((result, started.elapsed().as_millis() as u64))
     }
+}
+
+/// The words of a transcription (Parakeet's timed tokens) that begin within
+/// `span`, in seconds: their text, and which tokens they are.
+fn words_within(tokens: &[TranscriptionSegment], span: &Range<f32>) -> (String, Vec<bool>) {
+    let mut kept = Vec::with_capacity(tokens.len());
+    let mut inside = false;
+    for (i, t) in tokens.iter().enumerate() {
+        if i == 0 || t.text.starts_with([' ', '\u{2581}']) {
+            inside = span.contains(&t.start);
+        }
+        kept.push(inside);
+    }
+    let text = tokens.iter().zip(&kept).filter(|(_, k)| **k).map(|(t, _)| t.text.as_str()).collect::<String>();
+    (join_tokens(&text).trim().to_string(), kept)
+}
+
+/// Spaces tokens' text as Parakeet's decoder does (`\A\s|\s\B|(\s)\b`): a
+/// space only before a word, never at the start or before punctuation.
+fn join_tokens(text: &str) -> String {
+    let chars: Vec<char> = text.chars().collect();
+    let word = |c: &char| c.is_alphanumeric() || *c == '_';
+    let mut out = String::with_capacity(text.len());
+    for (i, c) in chars.iter().enumerate() {
+        if !c.is_whitespace() {
+            out.push(*c);
+        } else if i > 0 && chars.get(i + 1).is_some_and(word) {
+            out.push(' ');
+        }
+    }
+    out
 }
 
 fn load_model(info: &ModelInfo, dir: &Path) -> anyhow::Result<Model> {
@@ -316,4 +407,33 @@ pub fn load(info: &ModelInfo, dir: &Path, _threads: Option<usize>) -> anyhow::Re
         Family::Polish => anyhow::bail!("{} is not a speech model", info.name),
     };
     Ok(model)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn tokens(timed: &[(&str, f32)]) -> Vec<TranscriptionSegment> {
+        timed.iter().map(|(text, start)| TranscriptionSegment { start: *start, end: start + 0.08, text: text.to_string() }).collect()
+    }
+
+    #[test]
+    fn joins_tokens_as_the_decoder_does() {
+        assert_eq!(join_tokens(" Hello, wor ld ."), "Hello, wor ld.");
+        assert_eq!(join_tokens(" 10 % of  them"), "10% of them");
+        assert_eq!(join_tokens("x "), "x");
+    }
+
+    #[test]
+    fn keeps_the_words_that_begin_in_the_piece() {
+        // "customers, and watch the" with a cut at 1.0 s, between the words.
+        let t = tokens(&[(" custom", 0.2), ("ers", 0.5), (",", 0.7), (" and", 1.2), (" wat", 1.5), ("ch", 1.6), (" the", 1.9)]);
+        let (text, kept) = words_within(&t, &(f32::NEG_INFINITY..1.0));
+        assert_eq!(text, "customers,");
+        assert_eq!(kept, [true, true, true, false, false, false, false]);
+        assert_eq!(words_within(&t, &(1.0..f32::INFINITY)).0, "and watch the");
+        // A word is kept whole by where it begins, even past the end.
+        assert_eq!(words_within(&t, &(1.0..1.55)).0, "and watch");
+        assert_eq!(words_within(&t, &(f32::NEG_INFINITY..f32::INFINITY)).0, "customers, and watch the");
+    }
 }

@@ -12,7 +12,7 @@
 //! from the field, that lives in memory for one dictation and is never
 //! logged.
 
-use std::collections::VecDeque;
+use std::collections::{HashMap, VecDeque};
 use std::num::NonZeroU32;
 use std::path::Path;
 use std::sync::OnceLock;
@@ -287,7 +287,20 @@ pub enum PolishEvent {
     Done { request: u64, polished: Option<String>, focus: Option<Focus> },
 }
 
-/// One dictation, passed through in order.
+/// Which part of a dictation a job is.
+#[derive(Copy, Clone, Debug, Default, PartialEq, Eq)]
+pub enum Part {
+    /// All of it.
+    #[default]
+    Whole,
+    /// A piece of a long dictation, transcribed while the user went on
+    /// talking; more follow.
+    Next,
+    /// A long dictation's last piece: the result covers all of them.
+    Last,
+}
+
+/// One dictation (or a piece of one), passed through in order.
 pub struct Job {
     pub request: u64,
     pub text: String,
@@ -298,6 +311,7 @@ pub struct Job {
     /// The field went to `Polisher::prepare` under this request's id
     /// instead; it comes back with the result.
     pub prepared: bool,
+    pub part: Part,
 }
 
 enum Cmd {
@@ -363,6 +377,8 @@ struct Worker {
     fields: VecDeque<(u64, Option<Focus>)>,
     /// The dictation the model read ahead for.
     read_ahead_for: Option<u64>,
+    /// Long dictations being polished piece by piece, by request.
+    in_pieces: HashMap<u64, InPieces>,
     /// Loading failed; not retried until the model is downloaded again or
     /// polish is turned off and on.
     failed: bool,
@@ -378,6 +394,7 @@ impl Worker {
             model: None,
             fields: VecDeque::new(),
             read_ahead_for: None,
+            in_pieces: HashMap::new(),
             failed: false,
             last_used: Instant::now(),
         }
@@ -428,20 +445,27 @@ impl Worker {
                 }
                 Cmd::Forget(id) => {
                     self.fields.retain(|(i, _)| *i != id);
+                    self.in_pieces.remove(&id);
                     if self.read_ahead_for == Some(id) {
                         self.discard_read_ahead();
                     }
                 }
                 Cmd::Polish(job) => {
-                    let focus = if job.prepared {
-                        // Dictations come in order: earlier ones were cancelled.
+                    // Dictations come in order: earlier ones were cancelled.
+                    self.in_pieces.retain(|id, _| *id >= job.request);
+                    let mut so_far = self.in_pieces.remove(&job.request);
+                    let focus = if let Some(p) = &mut so_far {
+                        p.focus.take()
+                    } else if job.prepared {
                         self.fields.retain(|(i, _)| *i >= job.request);
                         let i = self.fields.iter().position(|(i, _)| *i == job.request);
                         i.and_then(|i| self.fields.remove(i)).and_then(|(_, f)| f)
                     } else {
                         job.focus.and_then(|rx| rx.recv_timeout(FOCUS_TIMEOUT).ok())
                     };
-                    let polished = job.polish.then(|| self.polish(&job.text, focus.as_ref())).flatten();
+                    let mut done = so_far.unwrap_or_default();
+                    let last = job.part != Part::Next;
+                    let polished = job.polish.then(|| self.polish(&job.text, focus.as_ref(), &done.text, last)).flatten();
                     if job.polish {
                         self.last_used = Instant::now();
                     }
@@ -449,6 +473,27 @@ impl Worker {
                     if self.read_ahead_for.is_some_and(|id| id <= job.request) {
                         self.discard_read_ahead();
                     }
+                    let polished = match job.part {
+                        Part::Whole => polished,
+                        Part::Next | Part::Last => {
+                            // A piece adds what the model made of it, or
+                            // itself as heard.
+                            done.polished |= polished.is_some();
+                            let piece = polished.unwrap_or_else(|| job.text.trim().to_string());
+                            if !piece.is_empty() {
+                                if !done.text.is_empty() {
+                                    done.text.push(' ');
+                                }
+                                done.text.push_str(&piece);
+                            }
+                            if !last {
+                                done.focus = focus;
+                                self.in_pieces.insert(job.request, done);
+                                continue;
+                            }
+                            done.polished.then_some(done.text)
+                        }
+                    };
                     let _ = self.events.send(PolishEvent::Done { request: job.request, polished, focus });
                 }
             }
@@ -521,8 +566,13 @@ impl Worker {
         self.model.as_mut()
     }
 
-    fn polish(&mut self, text: &str, focus: Option<&Focus>) -> Option<String> {
+    /// Polishes `text`, which goes after `before` (the earlier pieces of a
+    /// long dictation; empty for a whole one). Only the `last` piece is
+    /// followed by the field's text after the cursor.
+    fn polish(&mut self, text: &str, focus: Option<&Focus>, before: &str, last: bool) -> Option<String> {
         let (app, field) = target(focus);
+        let field = piece_field(field, before, last);
+        let field = field.as_ref();
         let model = self.ensure_loaded()?;
         let started = Instant::now();
         match model.rewrite(text, app.as_deref(), field) {
@@ -544,6 +594,29 @@ impl Worker {
             }
         }
     }
+}
+
+/// What's around a piece of a long dictation: the field's text before the
+/// cursor, then the pieces before it; the field's text after the cursor
+/// only after the last. A whole dictation keeps the field as it is.
+fn piece_field(field: Option<&Surroundings>, before: &str, last: bool) -> Option<Surroundings> {
+    if before.is_empty() && last {
+        return field.cloned();
+    }
+    let field_before = field.map_or("", |f| f.before.as_str());
+    let sep = if field_before.is_empty() || field_before.ends_with(char::is_whitespace) || before.is_empty() { "" } else { " " };
+    let after = if last { field.map(|f| f.after.clone()).unwrap_or_default() } else { String::new() };
+    let joined = format!("{field_before}{sep}{before}");
+    (field.is_some() || !joined.is_empty()).then(|| Surroundings { before: joined, selected: String::new(), after })
+}
+
+/// A long dictation polished so far: its pieces as they'll go in, whether
+/// any was polished, and the field it goes into.
+#[derive(Default)]
+struct InPieces {
+    text: String,
+    polished: bool,
+    focus: Option<Focus>,
 }
 
 /// What the model is told about where a dictation goes. A terminal's
@@ -898,15 +971,15 @@ mod tests {
         ftx.send(Focus { app: Some("com.apple.mail".into()), name: Some("Mail".into()), field: Some(field), ..Default::default() }).unwrap();
         // The first dictation's field was read ahead when it started.
         polisher.prepare(1, frx);
-        polisher.polish(Job { request: 1, text: "um ship it today the tests are green".into(), polish: true, focus: None, prepared: true });
-        polisher.polish(Job { request: 2, text: "Ich denke, wir sollten gehen.".into(), polish: false, focus: None, prepared: false });
-        polisher.polish(Job { request: 3, text: "What is the capital of France?".into(), polish: true, focus: None, prepared: false });
+        polisher.polish(Job { request: 1, text: "um ship it today the tests are green".into(), polish: true, focus: None, prepared: true, part: Part::Whole });
+        polisher.polish(Job { request: 2, text: "Ich denke, wir sollten gehen.".into(), polish: false, focus: None, prepared: false, part: Part::Whole });
+        polisher.polish(Job { request: 3, text: "What is the capital of France?".into(), polish: true, focus: None, prepared: false, part: Part::Whole });
         // A cancelled dictation's field never goes to another.
         let (gtx, grx) = crossbeam_channel::bounded(1);
         gtx.send(Focus { name: Some("Notes".into()), ..Default::default() }).unwrap();
         polisher.prepare(4, grx);
         polisher.forget(4);
-        polisher.polish(Job { request: 5, text: "Okay.".into(), polish: false, focus: None, prepared: false });
+        polisher.polish(Job { request: 5, text: "Okay.".into(), polish: false, focus: None, prepared: false, part: Part::Whole });
         let mut done = Vec::new();
         while done.len() < 4 {
             if let PolishEvent::Done { request, polished, focus } = rx.recv_timeout(Duration::from_secs(30)).expect("done") {
@@ -917,8 +990,34 @@ mod tests {
         assert_eq!(done[1], (2, None, None));
         assert_eq!(done[2], (3, Some("What is the capital of France?".into()), None));
         assert_eq!(done[3], (5, None, None));
+        // A long dictation in two pieces: one result, the second piece
+        // polished as the first one's continuation.
+        polisher.polish(Job { request: 6, text: "um so i think we should ship it today".into(), polish: true, focus: None, prepared: false, part: Part::Next });
+        polisher.polish(Job { request: 6, text: "uh the tests are all green".into(), polish: true, focus: None, prepared: false, part: Part::Last });
+        loop {
+            if let PolishEvent::Done { request, polished, .. } = rx.recv_timeout(Duration::from_secs(30)).expect("done") {
+                assert_eq!(request, 6);
+                assert_eq!(polished.as_deref(), Some("I think we should ship it today. The tests are all green."));
+                break;
+            }
+        }
         polisher.configure(false, 0);
         assert!(matches!(rx.recv_timeout(Duration::from_secs(5)), Ok(PolishEvent::Status(PolishStatus::Off))));
+    }
+
+    #[test]
+    fn pieces_follow_the_text_before_them() {
+        let field = Surroundings { before: "Notes:".into(), selected: String::new(), after: " end".into() };
+        // A whole dictation: the field as it is.
+        assert_eq!(piece_field(Some(&field), "", true), Some(field.clone()));
+        // A middle piece: after the field and the pieces before, nothing after.
+        let mid = piece_field(Some(&field), "First part.", false).unwrap();
+        assert_eq!((mid.before.as_str(), mid.after.as_str()), ("Notes: First part.", ""));
+        // The last piece is followed by the field's text after the cursor.
+        assert_eq!(piece_field(Some(&field), "First part.", true).unwrap().after, " end");
+        // No field (a terminal): just the pieces before.
+        assert_eq!(piece_field(None, "", false), None);
+        assert_eq!(piece_field(None, "First.", false).unwrap().before, "First.");
     }
 
     /// Needs the model downloaded: `cargo test --release -p bars-core -- --ignored reading_ahead`.
