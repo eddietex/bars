@@ -36,6 +36,13 @@
     <internet>first-run</internet>
   </requires>
   <releases>
+    <release version="0.6.1" date="2026-10-16">
+      <description>
+        <ul>
+          <li>Mute other audio now works on macOS 14.2 and later. It takes the System Audio Recording permission, which macOS asks for when you turn the option on; Bars never records.</li>
+        </ul>
+      </description>
+    </release>
     <release version="0.6.0" date="2026-10-15">
       <description>
         <ul>
