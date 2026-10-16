@@ -36,6 +36,17 @@
     <internet>first-run</internet>
   </requires>
   <releases>
+    <release version="0.6.0" date="2026-10-15">
+      <description>
+        <ul>
+          <li>Long dictations are transcribed while you talk: Bars cuts them at pauses and transcribes and polishes each piece in the background, so the text goes in moments after you stop. Dictations under 12 seconds work as before.</li>
+          <li>Fixes long dictations that came out empty: getting a long recording ready could take longer than Bars waited for it.</li>
+          <li>Mute other audio (Microphone settings, off by default) silences music, videos and other apps while you dictate, and turns them back on after.</li>
+          <li>Bars looks for updates when it starts and every 24 hours while it runs, counting the time the computer sleeps.</li>
+          <li>The licenses of the open-source software Bars is built with come with every package, and the settings link to them.</li>
+        </ul>
+      </description>
+    </release>
     <release version="0.5.0" date="2026-10-15">
       <description>
         <ul>
