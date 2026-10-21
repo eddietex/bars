@@ -36,6 +36,13 @@
     <internet>first-run</internet>
   </requires>
   <releases>
+    <release version="0.7.0" date="2026-10-21">
+      <description>
+        <ul>
+          <li>A shortcut can be a single key, like F9 or Pause, or a modifier on its own, like Right Option or Right Ctrl. Recording one remembers which side you pressed, so the other side works as usual. Keys that type or edit text, and Escape, still need a modifier.</li>
+        </ul>
+      </description>
+    </release>
     <release version="0.6.1" date="2026-10-16">
       <description>
         <ul>
