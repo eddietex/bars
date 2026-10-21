@@ -17,29 +17,33 @@ use ashpd::desktop::{CreateSessionOptions, PersistMode};
 use crossbeam_channel::Sender;
 use futures_util::StreamExt as _;
 
-use crate::hotkey::{Chord, HotkeyEvent, Mods};
+use crate::hotkey::{Chord, HotkeyEvent, Key, Mods};
 use crate::paths;
 
 const SHORTCUT_ID: &str = "dictate";
 
 /// Converts a chord to the XDG shortcuts-spec trigger format
-/// (e.g. `CTRL+LOGO+space`). Modifier-only chords get `space` appended,
-/// since desktops can't bind bare modifiers.
+/// (e.g. `CTRL+LOGO+space`). Modifier-only chords (one side's modifier
+/// too) get `space` appended, since desktops can't bind bare modifiers.
 pub fn trigger_for(chord: &Chord) -> String {
+    let (mods, key) = match chord.key.as_ref().and_then(Key::modifier) {
+        Some(m) => (chord.mods | m, None),
+        None => (chord.mods, chord.key.as_ref()),
+    };
     let mut parts = Vec::new();
-    if chord.mods.contains(Mods::CTRL) {
+    if mods.contains(Mods::CTRL) {
         parts.push("CTRL".to_string());
     }
-    if chord.mods.contains(Mods::ALT) {
+    if mods.contains(Mods::ALT) {
         parts.push("ALT".to_string());
     }
-    if chord.mods.contains(Mods::SHIFT) {
+    if mods.contains(Mods::SHIFT) {
         parts.push("SHIFT".to_string());
     }
-    if chord.mods.contains(Mods::SUPER) {
+    if mods.contains(Mods::SUPER) {
         parts.push("LOGO".to_string());
     }
-    let key = chord.key.as_ref().map(|k| keysym_name(&k.0)).unwrap_or_else(|| "space".into());
+    let key = key.map(|k| keysym_name(&k.0)).unwrap_or_else(|| "space".into());
     parts.push(key);
     parts.join("+")
 }
@@ -290,5 +294,7 @@ mod tests {
         assert_eq!(trigger_for(&"Alt+Shift+F9".parse().unwrap()), "ALT+SHIFT+F9");
         assert_eq!(trigger_for(&"Ctrl+Grave".parse().unwrap()), "CTRL+grave");
         assert_eq!(trigger_for(&"Super+H".parse().unwrap()), "LOGO+h");
+        assert_eq!(trigger_for(&"Rightalt".parse().unwrap()), "ALT+space");
+        assert_eq!(trigger_for(&"F9".parse().unwrap()), "F9");
     }
 }

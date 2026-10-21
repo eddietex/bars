@@ -324,6 +324,7 @@ impl AppState {
         let slot = self.capture_slot.take();
         let taken = self.config.hotkey.chords.iter().enumerate().any(|(i, c)| *c == chord && Some(i) != slot);
         let problem = match chord.is_valid() {
+            Err(e) if chord.parts().is_empty() => Some(e.to_string()),
             Err(e) => Some(format!("{e} (pressed {})", chord.label())),
             Ok(()) if taken => Some(format!("{} is already a shortcut", chord.label())),
             Ok(()) => None,

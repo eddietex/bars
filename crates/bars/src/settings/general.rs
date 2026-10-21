@@ -8,11 +8,17 @@ use bars_core::hotkey::{Activation, Mods};
 use super::{Page, SettingsView};
 
 #[cfg(target_os = "macos")]
-const MODIFIER_ONLY_HINT: &str = "Each one works in every app. Modifier-only shortcuts like Fn or Ctrl + Cmd never type anything, and a middle or side mouse button works too.";
+const SHORTCUT_HINT: &str = "Each one works in every app. Modifier-only shortcuts like Fn, Right Option or Ctrl + Cmd never type anything. A key on its own, like F9, or a middle or side mouse button works too.";
 #[cfg(target_os = "windows")]
-const MODIFIER_ONLY_HINT: &str = "Each one works in every app. Modifier-only shortcuts like Ctrl + Win never type anything, and a middle or side mouse button works too.";
+const SHORTCUT_HINT: &str = "Each one works in every app. Modifier-only shortcuts like Right Ctrl or Ctrl + Win never type anything. A key on its own, like F9 or Pause, or a middle or side mouse button works too.";
 #[cfg(not(any(target_os = "macos", target_os = "windows")))]
-const MODIFIER_ONLY_HINT: &str = "Each one works in every app. Modifier-only shortcuts like Ctrl + Super never type anything, and a middle or side mouse button works too.";
+const SHORTCUT_HINT: &str = "Each one works in every app. Modifier-only shortcuts like Right Ctrl or Ctrl + Super never type anything. A key on its own, like F9 or Pause, or a middle or side mouse button works too.";
+
+/// The modifier on its own that other shortcuts use least.
+#[cfg(target_os = "macos")]
+const QUIET_MODIFIER: &str = "Right Option";
+#[cfg(not(target_os = "macos"))]
+const QUIET_MODIFIER: &str = "Right Ctrl";
 
 #[cfg(target_os = "linux")]
 const SMART_SPACING_HINT: &str = "Reads the text around the cursor to add spaces, match capitalization and drop a final full stop mid-sentence. Works in apps with accessibility support (most GTK apps). Nothing is stored.";
@@ -34,6 +40,18 @@ impl SettingsView {
         let globe_hint = cfg!(target_os = "macos") && cfg.hotkey.chords.iter().any(|c| c.mods.contains(Mods::FN));
         // Linux reads the mouse without holding it: the button also reaches the app.
         let mouse_hint = cfg!(target_os = "linux") && cfg.hotkey.chords.iter().any(|c| c.mouse_button().is_some());
+        // So does a key on its own, unless the desktop holds the shortcut.
+        let lone_key_hint = cfg!(target_os = "linux")
+            && !st.desktop_shortcut
+            && cfg.hotkey.chords.iter().any(|c| c.mods.is_empty() && c.mouse_button().is_none() && c.lone_modifier().is_none());
+        // A modifier on its own starts listening whenever it begins another
+        // shortcut too; the right-hand ones rarely do.
+        let busy_modifier = cfg
+            .hotkey
+            .chords
+            .iter()
+            .find(|c| c.lone_modifier().is_some() && !c.key.as_ref().is_some_and(|k| k.0.starts_with("Right")))
+            .map(|c| c.label());
         let globe_link = div()
             .id("globe-settings")
             .text_color(p.accent_text)
@@ -216,7 +234,7 @@ impl SettingsView {
                                 Some(if desktop_shortcut {
                                     "Managed by your desktop's shortcut settings. Allow direct keyboard access in Setup to use modifier-only shortcuts, mouse buttons and more than one shortcut."
                                 } else {
-                                    MODIFIER_ONLY_HINT
+                                    SHORTCUT_HINT
                                 }),
                                 shortcut_list,
                                 p,
@@ -232,6 +250,29 @@ impl SettingsView {
                                         .text_size(px(12.5))
                                         .text_color(p.text_muted)
                                         .child("On Linux the mouse button also reaches the app you're in, so pick one it doesn't use (a side button may also go back in a browser)."),
+                                )
+                            })
+                            .when(lone_key_hint, |el| {
+                                el.child(
+                                    div()
+                                        .px(px(18.))
+                                        .pb(px(12.))
+                                        .text_size(px(12.5))
+                                        .text_color(p.text_muted)
+                                        .child("On Linux a key on its own also reaches the app you're in, so pick one it doesn't use."),
+                                )
+                            })
+                            .when_some(busy_modifier, |el, label| {
+                                el.child(
+                                    div()
+                                        .px(px(18.))
+                                        .pb(px(12.))
+                                        .text_size(px(12.5))
+                                        .text_color(p.text_muted)
+                                        .child(format!(
+                                            "Bars starts listening each time you press {label}, even as part of another shortcut. \
+                                             {QUIET_MODIFIER} gets in the way least."
+                                        )),
                                 )
                             })
                             .when(globe_hint, |el| {

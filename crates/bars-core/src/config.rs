@@ -392,8 +392,8 @@ mod tests {
     fn always_keeps_a_shortcut() {
         let chords = |toml: &str| toml::from_str::<Config>(&format!("[hotkey]\n{toml}\n")).unwrap().hotkey.chords;
         assert_eq!(chords("chords = []"), vec![Chord::default()]);
-        // Ones that can't work (left click, a lone modifier) don't count.
-        assert_eq!(chords("chords = [\"Mouse1\", \"Ctrl\"]"), vec![Chord::default()]);
+        // Ones that can't work (left click, a typing key alone) don't count.
+        assert_eq!(chords("chords = [\"Mouse1\", \"K\"]"), vec![Chord::default()]);
         assert_eq!(
             chords("chords = [\"Ctrl+Shift+K\", \"Mouse1\", \"Ctrl+Shift+K\"]"),
             vec!["Ctrl+Shift+K".parse::<Chord>().unwrap()]

@@ -26,6 +26,9 @@ const KEYS: &[(&str, u32)] = &[
     ("F16", 0x6A), ("F14", 0x6B), ("F10", 0x6D), ("F12", 0x6F), ("F15", 0x71), ("Insert", 0x72),
     ("Home", 0x73), ("Pageup", 0x74), ("Delete", 0x75), ("F4", 0x76), ("End", 0x77), ("F2", 0x78),
     ("Pagedown", 0x79), ("F1", 0x7A), ("Left", 0x7B), ("Right", 0x7C), ("Down", 0x7D), ("Up", 0x7E),
+    // One side's modifier, for a shortcut that is just that key.
+    ("Leftsuper", 0x37), ("Rightsuper", 0x36), ("Leftshift", 0x38), ("Rightshift", 0x3C),
+    ("Leftalt", 0x3A), ("Rightalt", 0x3D), ("Leftctrl", 0x3B), ("Rightctrl", 0x3E),
 ];
 
 /// Modifier key codes: Command, Shift, Option, Control (left/right).
@@ -79,7 +82,7 @@ mod tests {
 
     #[test]
     fn names_roundtrip() {
-        for name in ["Space", "A", "7", "F9", "Grave", "Pagedown", "Mouse3", "Mouse4", "Mouse12"] {
+        for name in ["Space", "A", "7", "F9", "Grave", "Pagedown", "Mouse3", "Mouse4", "Mouse12", "Rightalt", "Leftsuper"] {
             let c = MacKeys.code_of(name).unwrap_or_else(|| panic!("{name}"));
             assert_eq!(MacKeys.name_of(c).unwrap(), name);
         }

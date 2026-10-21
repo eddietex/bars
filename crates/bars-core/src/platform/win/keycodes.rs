@@ -5,7 +5,8 @@ use crate::hotkey::{Key, KeyMap, Mods};
 
 pub const VK_ESCAPE: u32 = 0x1B;
 /// An unassigned virtual key, tapped to keep Windows from opening the Start
-/// menu when a chord containing the Windows key is released.
+/// menu (or an app its menu bar) when a chord containing the Windows key
+/// (or Alt) is released.
 pub const VK_UNASSIGNED: u16 = 0xE8;
 pub const VK_MBUTTON: u32 = 0x04;
 pub const VK_XBUTTON1: u32 = 0x05;
@@ -47,6 +48,15 @@ const NAMED: &[(&str, u32)] = &[
     ("Pause", 0x13),
     ("Scrolllock", 0x91),
     ("Print", 0x2C),
+    // One side's modifier, for a shortcut that is just that key.
+    ("Leftshift", 0xA0),
+    ("Rightshift", 0xA1),
+    ("Leftctrl", 0xA2),
+    ("Rightctrl", 0xA3),
+    ("Leftalt", 0xA4),
+    ("Rightalt", 0xA5),
+    ("Leftsuper", 0x5B),
+    ("Rightsuper", 0x5C),
 ];
 
 pub struct WinKeys;
@@ -109,7 +119,7 @@ mod tests {
 
     #[test]
     fn names_roundtrip() {
-        for name in ["Space", "A", "7", "F9", "F24", "Grave", "Pagedown", "Mouse3", "Mouse4", "Mouse5"] {
+        for name in ["Space", "A", "7", "F9", "F24", "Grave", "Pagedown", "Mouse3", "Mouse4", "Mouse5", "Rightctrl", "Leftsuper"] {
             let c = WinKeys.code_of(name).unwrap_or_else(|| panic!("{name}"));
             assert_eq!(WinKeys.name_of(c).unwrap(), name);
         }

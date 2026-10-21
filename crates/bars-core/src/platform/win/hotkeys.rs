@@ -294,8 +294,8 @@ impl HookState {
             sync_mouse_hook_later();
         }
         let started = tracked.completed || tracked.events.contains(&HotkeyEvent::Down);
-        if started && tracked.mods.contains(Mods::SUPER) {
-            suppress_start_menu();
+        if started && tracked.mods.intersects(Mods::SUPER | Mods::ALT) {
+            suppress_menus();
         }
         for ev in tracked.events {
             let _ = self.events.send(ev);
@@ -309,9 +309,10 @@ fn sync_mouse_hook_later() {
     let _ = unsafe { PostThreadMessageW(GetCurrentThreadId(), WM_SYNC_MOUSE, WPARAM(0), LPARAM(0)) };
 }
 
-/// Releasing the Windows key after using it alone opens the Start menu. A
-/// tap of an unassigned key in between tells the shell it was a combination.
-fn suppress_start_menu() {
+/// Releasing the Windows key after using it alone opens the Start menu,
+/// and Alt the focused app's menu bar. A tap of an unassigned key in
+/// between tells them it was a combination.
+fn suppress_menus() {
     // Not from inside the hook callback: do it off-thread.
     thread::spawn(|| {
         let key = |flags: KEYBD_EVENT_FLAGS| INPUT {

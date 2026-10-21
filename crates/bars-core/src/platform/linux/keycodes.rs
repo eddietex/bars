@@ -53,6 +53,15 @@ const NAMED: &[(&str, K)] = &[
     ("Pause", K::KEY_PAUSE),
     ("Scrolllock", K::KEY_SCROLLLOCK),
     ("Print", K::KEY_SYSRQ),
+    // One side's modifier, for a shortcut that is just that key.
+    ("Leftctrl", K::KEY_LEFTCTRL),
+    ("Rightctrl", K::KEY_RIGHTCTRL),
+    ("Leftalt", K::KEY_LEFTALT),
+    ("Rightalt", K::KEY_RIGHTALT),
+    ("Leftshift", K::KEY_LEFTSHIFT),
+    ("Rightshift", K::KEY_RIGHTSHIFT),
+    ("Leftsuper", K::KEY_LEFTMETA),
+    ("Rightsuper", K::KEY_RIGHTMETA),
 ];
 
 const LETTERS: [K; 26] = [
@@ -113,7 +122,7 @@ mod tests {
 
     #[test]
     fn names_roundtrip() {
-        for name in ["Space", "A", "z", "7", "F9", "f24", "Grave", "Pagedown"] {
+        for name in ["Space", "A", "z", "7", "F9", "f24", "Grave", "Pagedown", "Rightalt", "Leftsuper"] {
             let k = key_from_name(name).unwrap_or_else(|| panic!("{name}"));
             assert_eq!(
                 name_from_key(k).unwrap(),

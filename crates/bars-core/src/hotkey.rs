@@ -1,9 +1,9 @@
 //! Platform-independent hotkey model: chords, the events backends emit, and
 //! the gesture recognizer that turns raw chord presses into dictation intents
 //! (push-to-talk, double-tap hands-free, toggle). Any number of shortcuts
-//! start dictation, and a shortcut can be a mouse button: backends report
-//! buttons as keys of their own, named `Mouse3` (middle), `Mouse4` (back),
-//! `Mouse5` (forward) and so on.
+//! start dictation, a shortcut can be a key on its own (F9, Pause), and it
+//! can be a mouse button: backends report buttons as keys of their own,
+//! named `Mouse3` (middle), `Mouse4` (back), `Mouse5` (forward) and so on.
 
 use std::collections::{HashMap, HashSet};
 use std::fmt;
@@ -77,20 +77,91 @@ impl Key {
         self.0.strip_prefix("Mouse")?.parse().ok().filter(|b| *b >= 1)
     }
 
+    /// A key that types or edits text: letters, digits, punctuation,
+    /// Space, Enter, Tab, Backspace and Delete. On its own as a shortcut it
+    /// would be taken from every app.
+    pub fn types_text(&self) -> bool {
+        self.0.chars().count() == 1
+            || matches!(
+                self.0.as_str(),
+                "Space"
+                    | "Enter"
+                    | "Tab"
+                    | "Backspace"
+                    | "Delete"
+                    | "Grave"
+                    | "Minus"
+                    | "Equal"
+                    | "Leftbracket"
+                    | "Rightbracket"
+                    | "Backslash"
+                    | "Semicolon"
+                    | "Apostrophe"
+                    | "Comma"
+                    | "Period"
+                    | "Slash"
+            )
+    }
+
+    /// One side's modifier key (`Rightalt`, `Leftctrl`), which a shortcut
+    /// uses as a key of its own: Right Option alone leaves the left one
+    /// to work as usual. Says which modifier it is.
+    pub fn modifier(&self) -> Option<Mods> {
+        let name = self.0.strip_prefix("Left").or_else(|| self.0.strip_prefix("Right"))?;
+        SIDED_NAMES.iter().find(|(_, n)| *n == name).map(|(m, _)| *m)
+    }
+
     /// For keycaps: "Space", "Mouse 4" (the numbers gamers know: 3 is
-    /// the middle button, 4 and 5 back and forward).
+    /// the middle button, 4 and 5 back and forward), "Right Option".
     pub fn label(&self) -> String {
-        match self.mouse_button() {
-            Some(b) => format!("Mouse {b}"),
+        if let Some(b) = self.mouse_button() {
+            return format!("Mouse {b}");
+        }
+        match self.modifier() {
+            Some(m) => {
+                let side = if self.0.starts_with("Left") { "Left" } else { "Right" };
+                format!("{side} {}", m.labels()[0])
+            }
             None => self.0.clone(),
         }
     }
 }
 
-/// A hotkey: one or more modifiers, optionally plus a single key (or mouse
-/// button, which needs no modifier). A chord without a key (e.g.
-/// Ctrl+Super) is a "modifier-only" chord, which is the most comfortable
-/// push-to-talk binding because it never types anything.
+/// The modifier a word names ("ctrl", "Option", "cmd"), either side.
+fn modifier_word(word: &str) -> Option<Mods> {
+    match word.to_ascii_lowercase().as_str() {
+        "ctrl" | "control" => Some(Mods::CTRL),
+        "alt" | "option" => Some(Mods::ALT),
+        "shift" => Some(Mods::SHIFT),
+        "super" | "meta" | "win" | "cmd" | "command" | "logo" => Some(Mods::SUPER),
+        "fn" | "globe" => Some(Mods::FN),
+        _ => None,
+    }
+}
+
+/// How one side's modifier keys are named, after "Left" or "Right".
+const SIDED_NAMES: [(Mods, &str); 4] =
+    [(Mods::CTRL, "ctrl"), (Mods::ALT, "alt"), (Mods::SHIFT, "shift"), (Mods::SUPER, "super")];
+
+/// The key name for one side's modifier ("RightOption", "right cmd",
+/// "Leftctrl"): `Rightalt`, `Rightsuper`, `Leftctrl`.
+fn sided_modifier_name(part: &str) -> Option<String> {
+    let lower = part.chars().filter(char::is_ascii_alphanumeric).collect::<String>().to_ascii_lowercase();
+    let (side, word) = match lower.strip_prefix("right") {
+        Some(word) => ("Right", word),
+        None => ("Left", lower.strip_prefix("left")?),
+    };
+    let m = modifier_word(word)?;
+    let (_, name) = SIDED_NAMES.iter().find(|(s, _)| *s == m)?;
+    Some(format!("{side}{name}"))
+}
+
+/// A hotkey: modifiers plus a single key (or mouse button), a key on its
+/// own (one that doesn't type, like F9), or modifiers alone. A chord
+/// without a key (e.g. Ctrl+Super, or a modifier on its own) is a
+/// "modifier-only" chord, which is the most comfortable push-to-talk
+/// binding because it never types anything. A modifier on its own can
+/// name its side, as a key: [`Key::modifier`].
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct Chord {
     pub mods: Mods,
@@ -113,13 +184,28 @@ impl Chord {
             return if button >= 3 { Ok(()) } else { Err("Left and right click can't be shortcuts") };
         }
         if self.mods.is_empty() {
-            return Err("A keyboard shortcut must include at least one modifier (Ctrl, Alt, Shift or Super)");
+            // A key on its own, as long as apps can do without it.
+            return match &self.key {
+                None => Err("That key can't be a shortcut"),
+                Some(k) if k.0 == "Escape" => Err("Escape cancels a dictation, so on its own it can't be a shortcut"),
+                Some(k) if k.types_text() => Err("A key that types or edits text needs a modifier (Ctrl, Alt, Shift or Super)"),
+                Some(_) => Ok(()),
+            };
         }
-        // Fn alone is fine: it never combines into anything else.
-        if self.key.is_none() && self.mods.bits().count_ones() < 2 && self.mods != Mods::FN {
-            return Err("A modifier-only shortcut needs at least two modifiers (or Fn on its own)");
+        if self.lone_modifier().is_none() && self.key.as_ref().is_some_and(|k| k.modifier().is_some()) {
+            return Err("A left or right modifier can only be a shortcut on its own");
         }
         Ok(())
+    }
+
+    /// The modifier this shortcut is, when it's one on its own (either
+    /// side, or one side's), Fn aside.
+    pub fn lone_modifier(&self) -> Option<Mods> {
+        match &self.key {
+            None => (self.mods.bits().count_ones() == 1 && self.mods != Mods::FN).then_some(self.mods),
+            Some(k) if self.mods.is_empty() => k.modifier(),
+            Some(_) => None,
+        }
     }
 
     /// The shortcut is the Fn (Globe) key on its own.
@@ -169,19 +255,15 @@ impl FromStr for Chord {
         let mut mods = Mods::empty();
         let mut key = None;
         for part in s.split('+').map(str::trim).filter(|p| !p.is_empty()) {
-            match part.to_ascii_lowercase().as_str() {
-                "ctrl" | "control" => mods |= Mods::CTRL,
-                "alt" | "option" => mods |= Mods::ALT,
-                "shift" => mods |= Mods::SHIFT,
-                "super" | "meta" | "win" | "cmd" | "command" | "logo" => mods |= Mods::SUPER,
-                "fn" | "globe" => mods |= Mods::FN,
-                _ => {
-                    if key.is_some() {
-                        return Err(format!("more than one non-modifier key in '{s}'"));
-                    }
-                    key = Some(Key(canonical_key_name(part)));
-                }
+            if let Some(m) = modifier_word(part) {
+                mods |= m;
+                continue;
             }
+            if key.is_some() {
+                return Err(format!("more than one non-modifier key in '{s}'"));
+            }
+            let name = sided_modifier_name(part).unwrap_or_else(|| canonical_key_name(part));
+            key = Some(Key(name));
         }
         Ok(Chord { mods, key })
     }
@@ -242,7 +324,8 @@ pub enum HotkeyEvent {
 pub trait KeyMap {
     /// The modifier a key code represents, if any.
     fn modifier_of(&self, code: u32) -> Option<Mods>;
-    /// Canonical name ("Space", "A", "F9", "Mouse4") for a non-modifier key.
+    /// Canonical name ("Space", "A", "F9", "Mouse4") for a non-modifier
+    /// key, or for one side's modifier ("Rightalt", see [`Key::modifier`]).
     fn name_of(&self, code: u32) -> Option<String>;
     /// Key code for a canonical name.
     fn code_of(&self, name: &str) -> Option<u32>;
@@ -349,7 +432,16 @@ impl ChordTracker {
                     .find(|k| map.modifier_of(**k).is_none())
                     .and_then(|k| map.name_of(*k))
                     .map(Key);
-                out.events.push(HotkeyEvent::Captured(Chord { mods: cmods, key }));
+                // A modifier on its own is recorded with its side.
+                let sided = match keys.as_slice() {
+                    [k] => map.name_of(*k).map(Key).filter(|k| k.modifier().is_some()),
+                    _ => None,
+                };
+                let chord = match sided {
+                    Some(k) => Chord { mods: Mods::empty(), key: Some(k) },
+                    None => Chord { mods: cmods, key },
+                };
+                out.events.push(HotkeyEvent::Captured(chord));
             }
             return out;
         }
@@ -361,13 +453,12 @@ impl ChordTracker {
         let others: Vec<u32> = keys.iter().copied().filter(|k| map.modifier_of(*k).is_none()).collect();
         // A shortcut whose key this platform doesn't have never matches.
         let key_of = |c: &Chord| c.key.as_ref().map(|k| map.code_of(&k.0).ok_or(()));
-        let exact = |c: &Chord| {
-            mods == c.mods
-                && match key_of(c) {
-                    None => others.is_empty(),
-                    Some(Ok(k)) => others.len() == 1 && others[0] == k,
-                    Some(Err(())) => false,
-                }
+        let exact = |c: &Chord| match key_of(c) {
+            None => mods == c.mods && others.is_empty(),
+            // One side's modifier, with nothing else held.
+            Some(Ok(k)) if map.modifier_of(k).is_some() => keys.len() == 1 && keys.contains(&k),
+            Some(Ok(k)) => mods == c.mods && others.len() == 1 && others[0] == k,
+            Some(Err(())) => false,
         };
         let held = |i: usize| {
             chords.get(i).is_some_and(|c| {
@@ -750,8 +841,47 @@ mod tests {
         let back: Chord = c.to_string().parse().unwrap();
         assert_eq!(back, c);
         assert!("Space".parse::<Chord>().unwrap().is_valid().is_err());
-        assert!("Ctrl".parse::<Chord>().unwrap().is_valid().is_err());
         assert!("Ctrl+F9".parse::<Chord>().unwrap().is_valid().is_ok());
+    }
+
+    #[test]
+    fn a_modifier_on_its_own() {
+        // Either side, or one side's.
+        for (text, m) in [("Ctrl", Mods::CTRL), ("Shift", Mods::SHIFT), ("Rightalt", Mods::ALT), ("Leftsuper", Mods::SUPER)] {
+            let c: Chord = text.parse().unwrap();
+            assert!(c.is_valid().is_ok(), "{text}");
+            assert_eq!(c.lone_modifier(), Some(m), "{text}");
+            assert_eq!(c.to_string().parse::<Chord>().unwrap(), c);
+        }
+        assert_eq!("Fn".parse::<Chord>().unwrap().lone_modifier(), None);
+        assert_eq!("Ctrl+Super".parse::<Chord>().unwrap().lone_modifier(), None);
+        // However it's written.
+        for text in ["RightOption", "right option", "Right_Alt", "rightalt"] {
+            assert_eq!(text.parse::<Chord>().unwrap().key, Some(Key("Rightalt".into())), "{text}");
+        }
+        assert_eq!("RightCmd".parse::<Chord>().unwrap().key, Some(Key("Rightsuper".into())));
+        assert_eq!("Rightalt".parse::<Chord>().unwrap().label(), format!("Right {ALT_LABEL}"));
+        assert_eq!("leftctrl".parse::<Chord>().unwrap().label(), "Left Ctrl");
+        // Keys that only start like one.
+        assert_eq!("Left".parse::<Chord>().unwrap().key, Some(Key("Left".into())));
+        assert_eq!("Rightbracket".parse::<Chord>().unwrap().key.unwrap().modifier(), None);
+        // A side only on its own.
+        assert!("Ctrl+Rightalt".parse::<Chord>().unwrap().is_valid().is_err());
+    }
+
+    #[test]
+    fn a_key_on_its_own_unless_it_types() {
+        for ok in ["F9", "f13", "Pause", "Capslock", "Insert", "Scrolllock", "Home"] {
+            let c: Chord = ok.parse().unwrap();
+            assert!(c.mods.is_empty() && c.is_valid().is_ok(), "{ok}");
+            assert_eq!(c.to_string().parse::<Chord>().unwrap(), c);
+        }
+        for typing in ["A", "7", "Space", "Enter", "Tab", "Backspace", "Delete", "Comma", "Grave", "Escape"] {
+            assert!(typing.parse::<Chord>().unwrap().is_valid().is_err(), "{typing}");
+        }
+        // A key no backend could name, with nothing else.
+        assert!(Chord { mods: Mods::empty(), key: None }.is_valid().is_err());
+        assert!("Shift+A".parse::<Chord>().unwrap().is_valid().is_ok());
     }
 
     #[test]
@@ -828,11 +958,16 @@ mod tests {
                 1 => Some(Mods::CTRL),
                 2 => Some(Mods::SUPER),
                 3 => Some(Mods::SHIFT),
+                // Right and left Alt.
+                4 | 5 => Some(Mods::ALT),
                 _ => None,
             }
         }
         fn name_of(&self, code: u32) -> Option<String> {
             match code {
+                1 => Some("Leftctrl".into()),
+                4 => Some("Rightalt".into()),
+                5 => Some("Leftalt".into()),
                 10 => Some("Space".into()),
                 11 => Some("Left".into()),
                 // Mouse buttons 1-9.
@@ -842,6 +977,9 @@ mod tests {
         }
         fn code_of(&self, name: &str) -> Option<u32> {
             match name {
+                "Leftctrl" => Some(1),
+                "Rightalt" => Some(4),
+                "Leftalt" => Some(5),
                 "Space" => Some(10),
                 "Left" => Some(11),
                 _ => Key(name.into()).mouse_button().map(|b| 200 + b as u32),
@@ -998,6 +1136,69 @@ mod tests {
         feed(&mut t, &mut k, 2, false, &chord, true);
         let ev = feed(&mut t, &mut k, 3, false, &chord, true);
         assert_eq!(ev, vec![HotkeyEvent::Captured("Shift+Super+Space".parse().unwrap())]);
+    }
+
+    #[test]
+    fn tracker_key_on_its_own() {
+        let chord: Chord = "Left".parse().unwrap();
+        let (mut t, mut k) = (ChordTracker::default(), Default::default());
+        assert_eq!(feed(&mut t, &mut k, 11, true, &chord, false), vec![HotkeyEvent::Down]);
+        assert_eq!(feed(&mut t, &mut k, 11, false, &chord, false), vec![HotkeyEvent::Up]);
+        // With a modifier it's another shortcut, left to the app.
+        feed(&mut t, &mut k, 3, true, &chord, false);
+        assert!(feed(&mut t, &mut k, 11, true, &chord, false).is_empty());
+        feed(&mut t, &mut k, 11, false, &chord, false);
+        feed(&mut t, &mut k, 3, false, &chord, false);
+        // A modifier pressed while it's held interrupts it.
+        feed(&mut t, &mut k, 11, true, &chord, false);
+        assert_eq!(feed(&mut t, &mut k, 1, true, &chord, false), vec![HotkeyEvent::Interrupted]);
+        feed(&mut t, &mut k, 1, false, &chord, false);
+        assert_eq!(feed(&mut t, &mut k, 11, false, &chord, false), vec![HotkeyEvent::Up]);
+        // Recorded on its own, and kept from the app.
+        feed(&mut t, &mut k, 11, true, &chord, true);
+        assert_eq!(feed(&mut t, &mut k, 11, false, &chord, true), vec![HotkeyEvent::Captured(chord.clone())]);
+        let mut f = KeyFilter::default();
+        let done = FilterInput { chords: std::slice::from_ref(&chord), completed_chord: true, ..Default::default() };
+        assert!(f.should_drop(&TestMap, 11, KeyChange::Press, &done));
+        assert!(f.should_drop(&TestMap, 11, KeyChange::Repeat, &FilterInput::default()));
+    }
+
+    #[test]
+    fn tracker_one_sides_modifier() {
+        const RIGHT_ALT: u32 = 4;
+        const LEFT_ALT: u32 = 5;
+        let chord: Chord = "Rightalt".parse().unwrap();
+        let (mut t, mut k) = (ChordTracker::default(), Default::default());
+        assert_eq!(feed(&mut t, &mut k, RIGHT_ALT, true, &chord, false), vec![HotkeyEvent::Down]);
+        assert_eq!(feed(&mut t, &mut k, RIGHT_ALT, false, &chord, false), vec![HotkeyEvent::Up]);
+        // The other side, or in another shortcut, it's left alone.
+        assert!(feed(&mut t, &mut k, LEFT_ALT, true, &chord, false).is_empty());
+        assert!(feed(&mut t, &mut k, LEFT_ALT, false, &chord, false).is_empty());
+        feed(&mut t, &mut k, 1, true, &chord, false);
+        assert!(feed(&mut t, &mut k, RIGHT_ALT, true, &chord, false).is_empty());
+        feed(&mut t, &mut k, RIGHT_ALT, false, &chord, false);
+        feed(&mut t, &mut k, 1, false, &chord, false);
+        // Another key while it's held interrupts it.
+        feed(&mut t, &mut k, RIGHT_ALT, true, &chord, false);
+        assert_eq!(feed(&mut t, &mut k, 11, true, &chord, false), vec![HotkeyEvent::Interrupted]);
+        feed(&mut t, &mut k, 11, false, &chord, false);
+        assert_eq!(feed(&mut t, &mut k, RIGHT_ALT, false, &chord, false), vec![HotkeyEvent::Up]);
+        // Either side's.
+        let either: Chord = "Alt".parse().unwrap();
+        assert_eq!(feed(&mut t, &mut k, LEFT_ALT, true, &either, false), vec![HotkeyEvent::Down]);
+        assert_eq!(feed(&mut t, &mut k, LEFT_ALT, false, &either, false), vec![HotkeyEvent::Up]);
+        // Recorded with its side; two modifiers aren't.
+        feed(&mut t, &mut k, RIGHT_ALT, true, &chord, true);
+        assert_eq!(feed(&mut t, &mut k, RIGHT_ALT, false, &chord, true), vec![HotkeyEvent::Captured(chord.clone())]);
+        feed(&mut t, &mut k, 1, true, &chord, true);
+        feed(&mut t, &mut k, RIGHT_ALT, true, &chord, true);
+        feed(&mut t, &mut k, RIGHT_ALT, false, &chord, true);
+        let both = feed(&mut t, &mut k, 1, false, &chord, true);
+        assert_eq!(both, vec![HotkeyEvent::Captured("Ctrl+Alt".parse().unwrap())]);
+        // Modifiers still reach the app.
+        let mut f = KeyFilter::default();
+        let done = FilterInput { chords: std::slice::from_ref(&chord), completed_chord: true, ..Default::default() };
+        assert!(!f.should_drop(&TestMap, RIGHT_ALT, KeyChange::Press, &done));
     }
 
     #[test]

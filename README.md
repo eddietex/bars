@@ -23,11 +23,13 @@ Spokenly Cleanup 1 on llama.cpp.
 
 The shortcut, activation style (hold + double-tap / hold / toggle), microphone,
 insertion method, model and more are in the settings window (click the tray
-icon). You can add more than one shortcut, all working the same way, and a
-shortcut can be a mouse button: the middle button or a side button, on its
-own or with modifiers (never left or right click). On macOS and Windows the
-button then does nothing else; on Linux it also reaches the app, so pick one
-the app doesn't use. Say **"new line"** or **"new paragraph"** to break lines; filler words
+icon). You can add more than one shortcut, all working the same way. A
+shortcut can be a modifier on its own, like Right Option or Right Ctrl (only
+that side's key counts, so the other one works as usual), a key on its own,
+like F9 or Pause (any key that doesn't type or edit text), or a mouse button:
+the middle button or a side button, on its own or with modifiers (never left
+or right click). On macOS and Windows the key or button then does nothing
+else; on Linux it also reaches the app, so pick one the app doesn't use. Say **"new line"** or **"new paragraph"** to break lines; filler words
 ("um", "uh") are removed; the Dictionary page holds word replacements and
 spoken snippets.
 
@@ -125,7 +127,7 @@ Bars picks the best available backend and falls back automatically:
 
 | Need | Preferred | Fallback (no setup) |
 | --- | --- | --- |
-| Global shortcut | **evdev**: reads keyboards (and mice, for a mouse-button shortcut); any chord, including modifier-only `Ctrl+Super` | **GlobalShortcuts portal**: desktop owns the binding, keys only (KDE, GNOME 48+, Hyprland) |
+| Global shortcut | **evdev**: reads keyboards (and mice, for a mouse-button shortcut); any chord, including modifier-only `Ctrl+Super`, a modifier on its own and a key on its own | **GlobalShortcuts portal**: desktop owns the binding, keys only (KDE, GNOME 48+, Hyprland) |
 | Insert text | **uinput** virtual keyboard: paste or layout-aware typing | **RemoteDesktop portal**: asks once, remembered |
 | Clipboard paste | Wayland data-control, with the old clipboard restored | Type key by key |
 | Recording pill | **layer-shell** overlay that never takes focus | Unfocused popup window |
