@@ -65,10 +65,10 @@ are applied ("send it to John, no wait, to Maria"), and numbers, email
 addresses and web addresses are written as you'd type them. It also sees
 the app's name and the text around the cursor, to continue a sentence.
 Questions and instructions stay as you said them, so dictating to a coding
-agent is safe, and Bars checks every result: one that adds words of its
-own, loses most of what you said or takes too long is dropped, and the
-dictation goes in as heard. Output polish is on by default, downloads during
-setup and can be turned off on the Models page.
+agent is safe, and Bars checks every result: one that adds words or line
+breaks of its own, loses most of what you said or takes too long is
+dropped, and the dictation goes in as heard. Output polish is on by
+default, downloads during setup and can be turned off on the Models page.
 
 When it starts and every 24 hours while it runs (sleep included), Bars
 looks for a newer version: it fetches a small file (`latest.json`) from
