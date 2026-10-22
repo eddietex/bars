@@ -196,33 +196,64 @@ struct Shared {
 pub struct Audio {
     tx: Sender<Cmd>,
     shared: Arc<Mutex<Shared>>,
+    levels: LevelSink,
 }
 
 pub type LevelSink = Arc<dyn Fn(f32) + Send + Sync>;
+
+/// How long `Audio::stop` waits for the audio thread.
+const STOP_WAIT: Duration = Duration::from_secs(3);
+
+/// The end of a recording.
+pub struct Stopped {
+    pub recording: Recording,
+    /// The audio thread didn't answer: it's stuck in the audio system (a
+    /// device that stopped responding). The recording is what the
+    /// microphone delivered until then; the thread can't be used again.
+    pub stuck: bool,
+}
 
 impl Audio {
     /// `levels` receives a smoothed 0..1 input level ~60 times per second
     /// while recording (drives the overlay waveform).
     pub fn spawn(levels: LevelSink) -> Audio {
         let (tx, rx) = unbounded();
-        let thread = AudioThread::new(levels);
+        let thread = AudioThread::new(levels.clone());
         let shared = thread.shared.clone();
         thread::Builder::new()
             .name("bars-audio".into())
             .spawn(move || thread.run(rx))
             .expect("spawn audio thread");
-        Audio { tx, shared }
+        Audio { tx, shared, levels }
+    }
+
+    /// A new audio thread in place of a stuck one, which is left behind.
+    pub fn respawn(&self) -> Audio {
+        Audio::spawn(self.levels.clone())
     }
 
     pub fn start(&self, device: Option<String>, warm: bool) {
         let _ = self.tx.send(Cmd::Start { device, warm });
     }
 
-    /// Ends the recording. None if the audio thread didn't answer.
-    pub fn stop(&self) -> Option<Recording> {
+    /// Ends the recording.
+    pub fn stop(&self) -> Stopped {
         let (tx, rx) = bounded(1);
         let _ = self.tx.send(Cmd::Stop(tx));
-        rx.recv_timeout(Duration::from_secs(3)).ok()
+        if let Ok(recording) = rx.recv_timeout(STOP_WAIT) {
+            return Stopped { recording, stuck: false };
+        }
+        // The microphone's callback only holds the lock briefly, but it's
+        // the audio system's thread: don't wait on it for long either.
+        let recording = match self.shared.try_lock_for(Duration::from_millis(500)) {
+            Some(mut s) => {
+                s.capturing = false;
+                Recording { samples: std::mem::take(&mut s.buf), rate: s.rate, peak: s.peak }
+            }
+            None => Recording::default(),
+        };
+        (self.levels)(0.0);
+        Stopped { recording, stuck: true }
     }
 
     /// While recording: what was recorded from sample `from` on (at the
@@ -479,10 +510,18 @@ impl AudioThread {
 
 /// A small fixed buffer when the device allows it. PulseAudio otherwise picks
 /// ~2 s record fragments, which would delay the start of every dictation.
+///
+/// macOS: never. There the buffer size belongs to the device, for all its
+/// streams, and CoreAudio's own default is small already. The microphone and
+/// the sound cues asking for different sizes on one device (a USB interface
+/// used for both) made it reconfigure while recording, and the cue's stream
+/// setup could deadlock with the microphone's callback.
 fn small_buffer(range: &cpal::SupportedBufferSize, rate: u32, ms: u32) -> cpal::BufferSize {
     let frames = (rate * ms / 1000).max(64);
     match range {
-        cpal::SupportedBufferSize::Range { min, max } if (*min..=*max).contains(&frames) => {
+        cpal::SupportedBufferSize::Range { min, max }
+            if !cfg!(target_os = "macos") && (*min..=*max).contains(&frames) =>
+        {
             cpal::BufferSize::Fixed(frames)
         }
         _ => cpal::BufferSize::Default,

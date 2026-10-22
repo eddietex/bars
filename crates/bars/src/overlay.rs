@@ -107,7 +107,8 @@ impl Overlay {
                 StateEvent::ThemeChanged
                 | StateEvent::UpdateFound
                 | StateEvent::UpdateResult
-                | StateEvent::UpdateInstalled => {}
+                | StateEvent::UpdateInstalled
+                | StateEvent::Restart => {}
             }),
         ];
         let mut this = Overlay {

@@ -68,6 +68,7 @@ pub struct Shell {
     tray: Option<crate::tray::TrayHandle>,
     /// macOS: the Dock icon is showing (while settings or setup is open).
     in_dock: bool,
+    restarting: bool,
     _subs: Vec<Subscription>,
 }
 
@@ -123,6 +124,7 @@ impl Shell {
             overlay_open: None,
             tray,
             in_dock: false,
+            restarting: false,
             _subs: subs,
         }
     }
@@ -188,6 +190,7 @@ impl Shell {
                 self.on_command(ShellCommand::Quit, cx);
                 return;
             }
+            StateEvent::Restart => self.restart_when_idle(cx),
         }
         if let Some(t) = &mut self.tray {
             let st = self.state.read(cx);
@@ -200,6 +203,34 @@ impl Shell {
         if let Some(t) = &mut self.tray {
             t.set_needs_setup(needs);
         }
+    }
+
+    /// Restarts Bars once the notice saying so has been up a while and no
+    /// dictation is under way.
+    fn restart_when_idle(&mut self, cx: &mut Context<Self>) {
+        if std::mem::replace(&mut self.restarting, true) {
+            return;
+        }
+        cx.spawn(async move |this, cx| {
+            cx.background_executor().timer(Duration::from_secs(3)).await;
+            loop {
+                match this.update(cx, |this, cx| this.state.read(cx).phase == Phase::Idle) {
+                    Ok(true) => break,
+                    Ok(false) => cx.background_executor().timer(Duration::from_millis(500)).await,
+                    Err(_) => return,
+                }
+            }
+            let _ = this.update(cx, |this, cx| {
+                #[cfg(target_os = "macos")]
+                if let Err(e) = bars_core::update::relaunch_after_exit() {
+                    log::error!("could not restart Bars: {e:#}");
+                    this.restarting = false;
+                    return;
+                }
+                this.on_command(ShellCommand::Quit, cx);
+            });
+        })
+        .detach();
     }
 
     /// Called once at startup: greet new users, and make sure anyone with

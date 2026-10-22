@@ -115,13 +115,20 @@ pub fn install() -> anyhow::Result<()> {
     Err(anyhow!("this copy of Bars can't update itself"))
 }
 
-/// macOS: opens the (replaced) app once this process has exited.
+/// macOS: opens the app (replaced, perhaps) once this process has exited.
+/// One that hasn't after 10 s is stuck (in the audio system, say) and is
+/// killed.
 #[cfg(target_os = "macos")]
 pub fn relaunch_after_exit() -> anyhow::Result<()> {
     let exe = std::env::current_exe()?;
-    let app = exe.ancestors().nth(3).ok_or_else(|| anyhow!("not inside an app"))?;
+    let app = exe
+        .ancestors()
+        .nth(3)
+        .filter(|p| p.extension().is_some_and(|e| e == "app"))
+        .ok_or_else(|| anyhow!("not inside an app"))?;
+    let script = r#"i=0; while kill -0 "$1" 2>/dev/null; do i=$((i+1)); [ "$i" -gt 50 ] && kill -9 "$1"; sleep 0.2; done; open "$2""#;
     std::process::Command::new("/bin/sh")
-        .args(["-c", r#"while kill -0 "$1" 2>/dev/null; do sleep 0.2; done; open "$2""#, "sh"])
+        .args(["-c", script, "sh"])
         .arg(std::process::id().to_string())
         .arg(app)
         .spawn()?;

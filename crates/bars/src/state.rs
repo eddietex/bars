@@ -45,6 +45,8 @@ pub enum StateEvent {
     UpdateResult,
     /// macOS: the update is in place; restart into it.
     UpdateInstalled,
+    /// macOS: audio needs a fresh start of Bars.
+    Restart,
 }
 
 /// Where looking for a newer Bars stands.
@@ -422,6 +424,7 @@ impl AppState {
             Event::LearningAvailable(on) => self.learning_available = on,
             Event::Polish(s) => self.polish = s,
             Event::Config(cfg) => self.config = *cfg,
+            Event::Restart => cx.emit(StateEvent::Restart),
         }
         cx.notify();
     }

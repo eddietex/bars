@@ -12,7 +12,7 @@ use std::time::{Duration, Instant};
 use chrono::Local;
 use crossbeam_channel::{Receiver, Sender, bounded, select, unbounded};
 
-use crate::audio::{Audio, Cue};
+use crate::audio::{Audio, Cue, Stopped};
 use crate::config::{Config, InsertionConfig, Replacement, Suggestion};
 use crate::engine::{Engine, EngineEvent, EngineStatus, Transcript};
 use crate::history::{self, History, Stats};
@@ -127,6 +127,8 @@ pub enum Event {
     LearningAvailable(bool),
     Polish(PolishStatus),
     Config(Box<Config>),
+    /// macOS: audio stopped working until Bars restarts; restart once idle.
+    Restart,
 }
 
 pub type EventSender = async_channel::Sender<Event>;
@@ -714,13 +716,10 @@ impl Controller {
         self.start_cue_at = None;
         self.recording_since = None;
         self.unmute_others();
-        let Some(rec) = self.audio.stop() else {
-            self.drop_recording();
-            self.notice(NoticeKind::Error, "Couldn't finish the recording");
-            self.set_phase(if self.pending.is_empty() { Phase::Idle } else { Phase::Transcribing });
-            return;
-        };
-        if self.cfg.audio.sounds {
+        let Stopped { recording: rec, stuck } = self.audio.stop();
+        if stuck {
+            self.replace_audio();
+        } else if self.cfg.audio.sounds {
             self.audio.cue(Cue::Stop, self.cfg.audio.sound_volume);
         }
         let secs = rec.duration().as_secs_f32();
@@ -733,7 +732,9 @@ impl Controller {
         }
         if loudness < 0.003 {
             self.drop_recording();
-            self.notice(NoticeKind::Warning, "Didn't hear anything — check your microphone");
+            if !stuck {
+                self.notice(NoticeKind::Warning, "Didn't hear anything — check your microphone");
+            }
             self.set_phase(if self.pending.is_empty() { Phase::Idle } else { Phase::Transcribing });
             return;
         }
@@ -753,6 +754,23 @@ impl Controller {
             self.engine.transcribe(id, rec.samples, rec.rate, self.cfg.model.language.clone());
         }
         self.set_phase(Phase::Transcribing);
+    }
+
+    /// The audio thread is stuck in the audio system. macOS: CoreAudio's
+    /// hang is in this process's state of the device, so a new thread would
+    /// hang as well; Bars restarts instead.
+    fn replace_audio(&mut self) {
+        log::error!("the audio thread stopped answering");
+        if cfg!(target_os = "macos") {
+            self.notice(NoticeKind::Error, "The audio device stopped responding. Restarting Bars…");
+            self.emit(Event::Restart);
+        } else {
+            self.audio = self.audio.respawn();
+            if self.cfg.audio.keep_warm {
+                self.audio.set_warm(self.cfg.audio.device.clone(), true);
+            }
+            self.notice(NoticeKind::Error, "The audio device stopped responding. Try again");
+        }
     }
 
     /// Mutes other audio while recording, if that's on: once the sound

@@ -81,6 +81,35 @@ fn single_instance_windows() -> bool {
     }
 }
 
+/// ~/Library/Logs/Bars.log (Console shows it), with the one before it kept
+/// as Bars.old.log once it gets big.
+#[cfg(target_os = "macos")]
+fn mac_log_file() -> Option<std::fs::File> {
+    let dir = std::path::PathBuf::from(std::env::var_os("HOME")?).join("Library/Logs");
+    let path = dir.join("Bars.log");
+    if std::fs::metadata(&path).is_ok_and(|m| m.len() > 4 << 20) {
+        let _ = std::fs::rename(&path, dir.join("Bars.old.log"));
+    }
+    std::fs::OpenOptions::new().create(true).append(true).open(path).ok()
+}
+
+/// Logs to the file and, for a Bars started from a terminal, stderr.
+#[cfg(target_os = "macos")]
+struct Tee(std::fs::File);
+
+#[cfg(target_os = "macos")]
+impl std::io::Write for Tee {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        let _ = std::io::stderr().write_all(buf);
+        self.0.write_all(buf)?;
+        Ok(buf.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        self.0.flush()
+    }
+}
+
 fn main() {
     // Windows: still print to the terminal Bars was started from, if any
     // (`bars --doctor`, errors, logs).
@@ -89,8 +118,14 @@ fn main() {
         use windows::Win32::System::Console::{ATTACH_PARENT_PROCESS, AttachConsole};
         let _ = AttachConsole(ATTACH_PARENT_PROCESS);
     }
-    env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info,ort=warn,naga=warn,wgpu=warn,blade_graphics=warn,transcribe_rs=warn,zbus=error,tracing::span=off,pulseaudio::client::reactor=off"))
-        .init();
+    #[cfg_attr(not(target_os = "macos"), allow(unused_mut))]
+    let mut logger = env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info,ort=warn,naga=warn,wgpu=warn,blade_graphics=warn,transcribe_rs=warn,zbus=error,tracing::span=off,pulseaudio::client::reactor=off"));
+    // macOS: an app opened from Finder has no terminal to log to.
+    #[cfg(target_os = "macos")]
+    if let Some(file) = mac_log_file() {
+        logger.target(env_logger::Target::Pipe(Box::new(Tee(file))));
+    }
+    logger.init();
     // Still before any other thread exists (the logger starts none).
     bars_core::audio::prepare_environment();
 
