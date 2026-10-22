@@ -36,6 +36,13 @@
     <internet>first-run</internet>
   </requires>
   <releases>
+    <release version="0.7.1" date="2026-10-22">
+      <description>
+        <ul>
+          <li>Output polish keeps a clean-up that writes an ordinal as digits, like “the fifteenth” as “the 15th”, instead of dropping it. A clean-up that breaks lines you didn't say is dropped, so it can't send a message early. AM or PM after a 24-hour time (“15:15 PM”) is left out.</li>
+        </ul>
+      </description>
+    </release>
     <release version="0.7.0" date="2026-10-21">
       <description>
         <ul>
