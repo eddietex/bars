@@ -36,8 +36,17 @@
     <internet>first-run</internet>
   </requires>
   <releases>
-    <release version="0.7.4" date="2026-10-26">
+    <release version="0.7.5" date="2026-10-26">
       <description>
+        <ul>
+          <li>macOS 27: Bars no longer says it needs Device Control and Data Access when it already has it and works. Some Macs report the permission as off while it's on; Bars now also checks what it can actually do.</li>
+          <li>The Setup page speaks each system's language: on macOS it asks for the microphone and Accessibility (Device Control and Data Access on macOS 27), on Windows for the microphone, and on Linux for the microphone and keyboard access. Its status shows how Bars sees your shortcut, types and treats the clipboard on your system.</li>
+          <li>macOS: Setup shows whether Bars may put back what you had copied, with Allow… when macOS asks first. Bars says it lives in the menu bar.</li>
+          <li>macOS: bars --doctor and the log show each permission check on its own.</li>
+        </ul>
+      </description>
+    </release>
+    <release version="0.7.4" date="2026-10-26">      <description>
         <ul>
           <li>macOS 27: macOS now asks before an app reads the clipboard, and its Allow lasts a single read. Bars no longer reads the clipboard unless it's allowed, so the clipboard can't end up empty: until then it keeps your dictation instead of what you had copied. To get your copied things back after each dictation, click Allow… next to Restore clipboard in settings, then turn on Bars under Privacy &amp; Security › Paste from Other Apps.</li>
           <li>macOS 27: setup and messages call the Accessibility permission by its new name, Device Control and Data Access.</li>
