@@ -151,7 +151,7 @@ impl SettingsView {
                         div()
                             .text_size(px(12.5))
                             .text_color(p.text_muted)
-                            .child("Download a speech model and allow keyboard access — it takes a minute."),
+                            .child(crate::wording::setup_banner()),
                     ),
             )
             .child(

@@ -93,7 +93,8 @@ impl MacHotkeys {
     pub fn spawn(chords: Vec<Chord>, events: Sender<HotkeyEvent>) -> anyhow::Result<Self> {
         // Checked first: creating a tap without access pops a system prompt
         // before the setup assistant has explained anything.
-        if !super::permissions::accessibility() && !super::permissions::input_monitoring() {
+        if !super::permissions::control() && !super::permissions::input_monitoring() {
+            log::info!("macOS access: {}", super::permissions::summary());
             anyhow::bail!("{} permission is needed", super::permissions::accessibility_pane());
         }
         let shared = Arc::new(Mutex::new(Shared {
@@ -148,6 +149,8 @@ impl MacHotkeys {
                 if !active {
                     log::info!("keyboard tap is listen-only: Escape and the shortcut's key also reach apps");
                 }
+                super::permissions::set_full_listener(active);
+                log::info!("macOS access: {}", super::permissions::summary());
                 tap.active.store(active, Ordering::Release);
                 tap.port
                     .store(cg_tap.mach_port().as_concrete_TypeRef() as usize, Ordering::Release);

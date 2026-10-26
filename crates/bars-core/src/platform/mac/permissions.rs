@@ -3,6 +3,8 @@
 //! event tap) and typing/pasting (posting key events). Input Monitoring
 //! would only cover the first, so Bars doesn't ask for it.
 
+use std::sync::atomic::{AtomicBool, Ordering};
+
 use block2::RcBlock;
 use core_foundation::base::TCFType;
 use core_foundation::boolean::CFBoolean;
@@ -23,6 +25,7 @@ unsafe extern "C" {
 #[link(name = "CoreGraphics", kind = "framework")]
 unsafe extern "C" {
     fn CGPreflightListenEventAccess() -> bool;
+    fn CGPreflightPostEventAccess() -> bool;
 }
 
 /// What System Settings calls the Accessibility permission (macOS 27
@@ -31,9 +34,53 @@ pub fn accessibility_pane() -> &'static str {
     if super::os_at_least(27, 0) { "Device Control and Data Access" } else { "Accessibility" }
 }
 
-/// Accessibility: lets Bars see the shortcut and type into other apps.
+/// Accessibility as macOS reports it. Some macOS 27 machines report it
+/// off while it's on and works, so decisions go through [`control`].
 pub fn accessibility() -> bool {
     unsafe { AXIsProcessTrusted() }
+}
+
+/// Posting key events, which pasting and typing need. Accessibility
+/// includes it.
+pub fn post_events() -> bool {
+    unsafe { CGPreflightPostEventAccess() }
+}
+
+static FULL_LISTENER: AtomicBool = AtomicBool::new(false);
+
+/// The shortcut listener started with the access that lets it hold keys
+/// back from apps, which only Accessibility gives.
+pub fn full_listener() -> bool {
+    FULL_LISTENER.load(Ordering::Relaxed)
+}
+
+pub(super) fn set_full_listener(on: bool) {
+    FULL_LISTENER.store(on, Ordering::Relaxed);
+}
+
+/// Accessibility as it works: macOS saying so, or Bars doing what only
+/// Accessibility allows.
+pub fn control() -> bool {
+    granted(accessibility(), post_events(), full_listener())
+}
+
+fn granted(reported: bool, post_events: bool, full_listener: bool) -> bool {
+    reported || post_events || full_listener
+}
+
+/// One line for the log and the doctor.
+pub fn summary() -> String {
+    format!(
+        "accessibility reported {}, posting key events {}, input monitoring {}, shortcut listener {}",
+        yes(accessibility()),
+        yes(post_events()),
+        yes(input_monitoring()),
+        if full_listener() { "full" } else { "listen-only or not started" }
+    )
+}
+
+fn yes(on: bool) -> &'static str {
+    if on { "yes" } else { "no" }
 }
 
 /// Input Monitoring, which an earlier version asked for. It's enough for
@@ -84,4 +131,18 @@ pub fn request_microphone() {
         let done = RcBlock::new(|granted: Bool| log::info!("microphone access granted: {}", granted.as_bool()));
         unsafe { AVCaptureDevice::requestAccessForMediaType_completionHandler(audio, &done) };
     });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn any_sign_of_access_counts() {
+        assert!(!granted(false, false, false));
+        // macOS 27 can report Accessibility off while Bars pastes and holds keys back.
+        assert!(granted(false, true, false));
+        assert!(granted(false, false, true));
+        assert!(granted(true, false, false));
+    }
 }

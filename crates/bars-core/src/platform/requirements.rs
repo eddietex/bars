@@ -182,7 +182,7 @@ fn macos() -> Vec<Requirement> {
               Turn on Bars in the list that opens. If it's already on but this still says it's needed \
               (common after an update), select Bars, remove it with −, then allow access again."
             .into(),
-        status: if permissions::accessibility() { ReqStatus::Granted } else { ReqStatus::Missing },
+        status: if permissions::control() { ReqStatus::Granted } else { ReqStatus::Missing },
         granted_note: Some("Bars can see your shortcut and type into other apps".into()),
         actions: vec![
             FixAction::Elevate,

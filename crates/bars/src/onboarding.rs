@@ -671,11 +671,7 @@ impl Onboarding {
                             .child(format!("Nice! Bars heard: “{}”", text.trim())),
                     )
                     .into_any_element(),
-                None if !ready => hint(
-                    "Finish the earlier steps first. Bars needs the model and keyboard access to work.",
-                    p,
-                )
-                .into_any_element(),
+                None if !ready => hint(&crate::wording::needs_for_dictation(), p).into_any_element(),
                 None => hint("Tip: double-tap the shortcut to keep talking hands-free, tap again to finish.", p)
                     .into_any_element(),
             })
@@ -701,7 +697,11 @@ impl Onboarding {
             )
             .child(title("Bars is ready", p))
             .child(lead(
-                "It lives in your system tray. Click the icon any time for settings, history and your dictionary.",
+                if cfg!(target_os = "macos") {
+                    "It lives in the menu bar. Click the icon any time for settings, history and your dictionary."
+                } else {
+                    "It lives in your system tray. Click the icon any time for settings, history and your dictionary."
+                },
                 p,
             ))
             .child(

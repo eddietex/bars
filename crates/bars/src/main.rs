@@ -25,6 +25,7 @@ mod tray;
 #[path = "tray_native.rs"]
 mod tray;
 mod widgets;
+mod wording;
 
 use std::borrow::Cow;
 

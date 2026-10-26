@@ -70,8 +70,8 @@ pub fn check_permissions(ctx: &requirements::Context) -> Permissions {
     #[cfg(target_os = "macos")]
     {
         Permissions {
-            hotkeys: mac::permissions::accessibility() || mac::permissions::input_monitoring(),
-            keyboard: mac::permissions::accessibility(),
+            hotkeys: mac::permissions::control() || mac::permissions::input_monitoring(),
+            keyboard: mac::permissions::control(),
             clipboard: true,
             sandboxed: false,
             fix_command: None,
@@ -117,7 +117,7 @@ pub fn fix_permissions(only: Option<requirements::ReqId>) -> anyhow::Result<()> 
         if want(ReqId::Microphone) {
             mac::permissions::request_microphone();
         }
-        if want(ReqId::Accessibility) && !mac::permissions::accessibility() {
+        if want(ReqId::Accessibility) && !mac::permissions::control() {
             // Lists Bars in Accessibility (and prompts, the first time
             // only), then opens that list so there's always a next step.
             mac::permissions::request_accessibility();
@@ -137,7 +137,7 @@ pub fn fix_permissions(only: Option<requirements::ReqId>) -> anyhow::Result<()> 
 pub fn hotkey_access_granted() -> bool {
     #[cfg(target_os = "macos")]
     {
-        mac::permissions::accessibility() || mac::permissions::input_monitoring()
+        mac::permissions::control() || mac::permissions::input_monitoring()
     }
     #[cfg(not(target_os = "macos"))]
     {

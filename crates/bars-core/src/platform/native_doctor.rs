@@ -71,9 +71,11 @@ pub fn report() -> String {
     let _ = writeln!(
         out,
         "  [{}] global shortcut (event tap; needs {})",
-        mark(super::mac::permissions::accessibility() || super::mac::permissions::input_monitoring()),
+        mark(super::mac::permissions::control() || super::mac::permissions::input_monitoring()),
         super::mac::permissions::accessibility_pane()
     );
+    #[cfg(target_os = "macos")]
+    let _ = writeln!(out, "        {}", super::mac::permissions::summary());
     #[cfg(target_os = "macos")]
     let _ = writeln!(
         out,

@@ -244,7 +244,7 @@ impl SettingsView {
                         v_col()
                             .child(row(
                                 "Dictation shortcuts",
-                                Some(if desktop_shortcut {
+                                Some(if cfg!(target_os = "linux") && desktop_shortcut {
                                     "Managed by your desktop's shortcut settings. Allow direct keyboard access in Setup to use modifier-only shortcuts, mouse buttons and more than one shortcut."
                                 } else {
                                     SHORTCUT_HINT
@@ -321,7 +321,7 @@ impl SettingsView {
                                         .pb(px(12.))
                                         .text_size(px(12.5))
                                         .text_color(p.warning)
-                                        .child("Keyboard access is off — see Setup."),
+                                        .child(crate::wording::shortcut_off()),
                                 )
                             })
                             .into_any_element(),
@@ -528,7 +528,11 @@ impl SettingsView {
                         .into_any_element(),
                         row(
                             "Start at login",
-                            Some("Bars lives in the system tray."),
+                            Some(if cfg!(target_os = "macos") {
+                                "Bars lives in the menu bar."
+                            } else {
+                                "Bars lives in the system tray."
+                            }),
                             small_switch("autostart", cfg.ui.launch_at_login, {
                                 let set = set.clone();
                                 move |v, _, cx| {
