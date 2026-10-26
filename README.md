@@ -202,13 +202,14 @@ git tag v0.1.0 && git push origin v0.1.0
 ```
 
 The Windows build is unsigned, so SmartScreen warns on first launch. The
-macOS app is signed with a self-signed certificate (secrets
-`MACOS_SIGNING_P12` and `MACOS_SIGNING_PASSWORD`; see
-`scripts/macos-signing-keychain.sh`): Gatekeeper still asks once (System
-Settings > Privacy & Security > Open Anyway), but every release carries the
-same identity, so macOS keeps Accessibility and Microphone access across
-updates. Without the secrets the app is signed ad hoc. Opening without any
-prompt needs an Apple Developer ID with notarization.
+macOS app and DMG are signed with a Developer ID Application certificate
+(secrets `MACOS_DEVELOPER_ID_P12`, a base64 .p12 with Apple's intermediate,
+and `MACOS_DEVELOPER_ID_PASSWORD`; see `scripts/macos-signing-keychain.sh`)
+and notarized with an App Store Connect API key (`APPLE_API_KEY`, the .p8
+file's contents, `APPLE_API_KEY_ID` and `APPLE_API_ISSUER_ID`), so they open
+without a warning. macOS keys Accessibility and Microphone access to the
+certificate's Team ID, so it lasts across updates and certificate renewals.
+Without the secrets the app is signed ad hoc and not notarized.
 
 In-app updates read `latest.json` from the latest published release (a
 draft is never "latest", so publishing the release is what offers it).

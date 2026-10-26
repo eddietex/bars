@@ -1,14 +1,12 @@
 #!/usr/bin/env bash
-# CI only: puts the self-signed code-signing certificate (a base64 .p12 in
-# $P12, its password in $P12_PASSWORD) into a temporary keychain, trusts it
-# for code signing on this runner, and exports BARS_SIGNING_IDENTITY for
+# CI only: puts the Developer ID Application certificate (a base64 .p12 in
+# $P12 with Apple's intermediate, its password in $P12_PASSWORD) into a
+# temporary keychain and exports BARS_SIGNING_IDENTITY for
 # package-macos.sh. Without $P12 it does nothing, and the app is signed ad
 # hoc instead.
 #
-# The certificate is self-signed, not an Apple Developer ID: a downloaded
-# Bars still needs "Open Anyway" once, but every release carries the same
-# identity, so macOS keeps Accessibility and Microphone access across
-# updates.
+# macOS keys Bars' Accessibility and Microphone access to the Team ID in the
+# certificate, so they last across updates and certificate renewals.
 set -euo pipefail
 
 if [ -z "${P12:-}" ]; then
@@ -29,12 +27,12 @@ security import "$dir/bars.p12" -k "$keychain" -P "$P12_PASSWORD" -T /usr/bin/co
 security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "$keychain_password" "$keychain" >/dev/null
 security list-keychains -d user -s "$keychain" $(security list-keychains -d user | tr -d '"')
 
-# A self-signed certificate isn't trusted by default.
-openssl pkcs12 -in "$dir/bars.p12" -nokeys -passin env:P12_PASSWORD -out "$dir/bars.pem"
-sudo security add-trusted-cert -d -r trustRoot -p codeSign -k /Library/Keychains/System.keychain "$dir/bars.pem"
+# The certificate that goes with the key, not Apple's intermediate.
+openssl pkcs12 -in "$dir/bars.p12" -clcerts -nokeys -passin env:P12_PASSWORD -out "$dir/bars.pem"
 rm -f "$dir/bars.p12"
 
 identity=$(openssl x509 -in "$dir/bars.pem" -noout -fingerprint -sha1 | sed 's/.*=//; s/://g')
-security find-identity -p codesigning "$keychain"
+openssl x509 -in "$dir/bars.pem" -noout -subject -enddate
+security find-identity -v -p codesigning "$keychain"
 echo "BARS_SIGNING_IDENTITY=$identity" >> "$GITHUB_ENV"
 echo "Signing as $identity"

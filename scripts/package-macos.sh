@@ -34,19 +34,49 @@ iconutil -c icns "$iconset" -o "$app/Contents/Resources/$icon_file"
 
 # Sign the whole app, not just the executable (the linker's ad hoc
 # signature leaves Info.plist and resources unsealed, which macOS reports
-# as "damaged" for a downloaded copy). CI signs with the self-signed
-# certificate (scripts/macos-signing-keychain.sh): one identity across
-# releases keeps Accessibility and Microphone access through updates.
-# Elsewhere: ad hoc.
+# as "damaged" for a downloaded copy), with the hardened runtime that
+# notarization requires. CI signs with the Developer ID certificate
+# (scripts/macos-signing-keychain.sh). Elsewhere: ad hoc, which can't carry
+# a timestamp.
 identity="${BARS_SIGNING_IDENTITY:--}"
-codesign --force --sign "$identity" --timestamp=none "$app"
+timestamp=--timestamp
+[ "$identity" = - ] && timestamp=--timestamp=none
+codesign --force --sign "$identity" "$timestamp" --options runtime \
+  --entitlements packaging/macos/Bars.entitlements "$app"
 codesign --verify --strict --verbose=2 "$app"
 codesign --display --requirements - "$app"
 
-# The in-app updater's download: the app as signed above, so an update
-# keeps the code signature (and with it Accessibility and Microphone
-# access), plus a signature with the updater key (CI secret). Made here
-# rather than by cargo-packager, whose archive is taken before codesign.
+# Notarized (CI, with the App Store Connect API key in $APPLE_API_KEY): Apple
+# checks the upload, and its ticket is stapled on, so macOS opens Bars
+# without a warning, offline too.
+notarize() {
+  local out id status
+  out=$(xcrun notarytool submit "$1" --key "$api_key" --key-id "$APPLE_API_KEY_ID" \
+    --issuer "$APPLE_API_ISSUER_ID" --wait --output-format json) || true
+  id=$(printf '%s' "$out" | python3 -c 'import json, sys; print(json.load(sys.stdin)["id"])')
+  status=$(printf '%s' "$out" | python3 -c 'import json, sys; print(json.load(sys.stdin)["status"])')
+  echo "notarization of $(basename "$1"): $status ($id)"
+  if [ "$status" != Accepted ]; then
+    xcrun notarytool log "$id" --key "$api_key" --key-id "$APPLE_API_KEY_ID" --issuer "$APPLE_API_ISSUER_ID"
+    return 1
+  fi
+}
+if [ -n "${APPLE_API_KEY:-}" ]; then
+  : "${APPLE_API_KEY_ID:?}" "${APPLE_API_ISSUER_ID:?}"
+  api_key=$(mktemp -d)/AuthKey.p8
+  printf '%s\n' "$APPLE_API_KEY" > "$api_key"
+  zip=$(mktemp -d)/Bars.zip
+  ditto -c -k --keepParent "$app" "$zip"
+  notarize "$zip"
+  xcrun stapler staple "$app"
+  spctl --assess --type execute --verbose=2 "$app"
+fi
+
+# The in-app updater's download: the app as signed (and stapled) above, so
+# an update keeps the code signature (and with it Accessibility and
+# Microphone access), plus a signature with the updater key (CI secret).
+# Made here rather than by cargo-packager, whose archive is taken before
+# codesign.
 if [ -n "${BARS_UPDATER_KEY:-}" ]; then
   archive="dist/Bars_${version}_${arch}.app.tar.gz"
   COPYFILE_DISABLE=1 tar -czf "$archive" -C "$(dirname "$app")" "$(basename "$app")"
@@ -62,4 +92,12 @@ rm -f "$dmg"
 .dmgbuild/bin/dmgbuild -s packaging/macos/dmg_settings.py \
   -D app="$app" -D background=packaging/macos/dmg-background.tiff \
   "Bars" "$dmg"
+if [ "$identity" != - ]; then
+  codesign --force --sign "$identity" --timestamp "$dmg"
+fi
+if [ -n "${APPLE_API_KEY:-}" ]; then
+  notarize "$dmg"
+  xcrun stapler staple "$dmg"
+  spctl --assess --type open --context context:primary-signature --verbose=2 "$dmg"
+fi
 echo "$dmg"

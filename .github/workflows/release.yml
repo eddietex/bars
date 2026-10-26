@@ -153,18 +153,22 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - run: cargo install cargo-packager --locked --version 0.11.8
       - run: cargo build --release -p bars --locked
-      # Self-signed (not notarized): one identity across releases, so macOS
-      # keeps Bars' permissions through updates. Skipped without the secrets.
+      # Developer ID: macOS keeps Bars' permissions through updates. Skipped
+      # without the secrets (forks), and the app is signed ad hoc.
       - name: Signing certificate
         env:
-          P12: ${{ secrets.MACOS_SIGNING_P12 }}
-          P12_PASSWORD: ${{ secrets.MACOS_SIGNING_PASSWORD }}
+          P12: ${{ secrets.MACOS_DEVELOPER_ID_P12 }}
+          P12_PASSWORD: ${{ secrets.MACOS_DEVELOPER_ID_PASSWORD }}
         run: bash scripts/macos-signing-keychain.sh
       # Bars.app via cargo-packager (signed in the script), the DMG (with its
-      # Finder layout) via dmgbuild, and the in-app updater's archive and
-      # signature (skipped without the key).
+      # Finder layout) via dmgbuild, both notarized with the App Store
+      # Connect API key, and the in-app updater's archive and signature.
+      # Each step is skipped without its secrets.
       - run: bash scripts/package-macos.sh
         env:
+          APPLE_API_KEY: ${{ secrets.APPLE_API_KEY }}
+          APPLE_API_KEY_ID: ${{ secrets.APPLE_API_KEY_ID }}
+          APPLE_API_ISSUER_ID: ${{ secrets.APPLE_API_ISSUER_ID }}
           BARS_UPDATER_KEY: ${{ secrets.UPDATER_PRIVATE_KEY }}
           BARS_UPDATER_KEY_PASSWORD: ${{ secrets.UPDATER_PRIVATE_KEY_PASSWORD }}
       - uses: actions/upload-artifact@v4
