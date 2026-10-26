@@ -36,8 +36,15 @@
     <internet>first-run</internet>
   </requires>
   <releases>
-    <release version="0.7.3" date="2026-10-26">
+    <release version="0.7.4" date="2026-10-26">
       <description>
+        <ul>
+          <li>macOS 27: macOS now asks before an app reads the clipboard, and its Allow lasts a single read. Bars no longer reads the clipboard unless it's allowed, so the clipboard can't end up empty: until then it keeps your dictation instead of what you had copied. To get your copied things back after each dictation, click Allow… next to Restore clipboard in settings, then turn on Bars under Privacy &amp; Security › Paste from Other Apps.</li>
+          <li>macOS 27: setup and messages call the Accessibility permission by its new name, Device Control and Data Access.</li>
+        </ul>
+      </description>
+    </release>
+    <release version="0.7.3" date="2026-10-26">      <description>
         <ul>
           <li>macOS: Bars is signed with an Apple Developer ID and notarized by Apple, so it opens without a warning, with no “Open Anyway” in Privacy &amp; Security.</li>
           <li>macOS: because of the new signature, macOS asks once more for Microphone and Accessibility access (and System Audio Recording, if Bars mutes other apps). If Bars is already listed and switched on in Accessibility, remove it with the − button and add it again. From then on the permissions last through updates.</li>
