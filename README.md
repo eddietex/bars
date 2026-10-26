@@ -50,7 +50,11 @@ accessibility support, such as GTK apps). Long text pasted into Claude Code
 or Codex goes in pieces, so it shows as text instead of "[Pasted text]". If
 no text box had focus, the pill says so and offers the text to copy. Pasted
 text is kept out of clipboard-history apps, and everything you had copied
-(images and files too) comes back afterwards.
+(images and files too) comes back afterwards. macOS 27 asks before an app
+reads the clipboard, and its Allow lasts one read; until Bars is allowed
+under Privacy & Security › Paste from Other Apps (*Allow…* next to Restore
+clipboard gets it there), Bars doesn't read it and the clipboard keeps the
+dictation.
 
 With a Parakeet model, Bars learns from your corrections: fix a word it got
 wrong, in the app you dictated into or on the History page, and it adds the
@@ -261,7 +265,8 @@ The shortcut, insertion, overlay, tray, autostart and permission backends
 are implemented on all three platforms. What the setup assistant asks for
 lives in `platform/requirements.rs`: keyboard access on Linux (udev rule),
 microphone privacy on Windows, and Microphone and Accessibility on macOS
-(Accessibility covers both noticing the shortcut and typing). macOS
+(Accessibility, called Device Control and Data Access since macOS 27,
+covers both noticing the shortcut and typing). macOS
 keyboard simulation runs on the main thread: layout lookups abort the app
 anywhere else.
 

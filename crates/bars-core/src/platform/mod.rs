@@ -357,6 +357,46 @@ pub enum Inserted {
     NotRead,
 }
 
+/// Whether Bars may read the clipboard to put back what was copied. macOS
+/// 27 asks first unless Bars is allowed under Paste from Other Apps.
+pub fn clipboard_restore_allowed() -> bool {
+    #[cfg(target_os = "macos")]
+    {
+        mac::paste::read_access() == mac::paste::ReadAccess::Allowed
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        true
+    }
+}
+
+/// macOS: has macOS ask about Bars reading the clipboard now (which lists
+/// Bars under Paste from Other Apps), then opens that pane.
+pub fn request_clipboard_access() -> anyhow::Result<()> {
+    #[cfg(target_os = "macos")]
+    {
+        mac::paste::ask_for_read_access();
+        requirements::open_url(mac::paste::PASTE_SETTINGS)
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        Ok(())
+    }
+}
+
+/// True once per run: a dictation stayed on the clipboard instead of what
+/// was copied before, since reading that wasn't allowed.
+pub fn clipboard_restore_skipped() -> bool {
+    #[cfg(target_os = "macos")]
+    {
+        mac::paste::take_restore_skipped()
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        false
+    }
+}
+
 /// Inserts text into the focused application.
 pub struct Injector {
     #[cfg(target_os = "linux")]

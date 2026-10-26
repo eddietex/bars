@@ -94,7 +94,7 @@ impl MacHotkeys {
         // Checked first: creating a tap without access pops a system prompt
         // before the setup assistant has explained anything.
         if !super::permissions::accessibility() && !super::permissions::input_monitoring() {
-            anyhow::bail!("Accessibility permission is needed");
+            anyhow::bail!("{} permission is needed", super::permissions::accessibility_pane());
         }
         let shared = Arc::new(Mutex::new(Shared {
             chords,

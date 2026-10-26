@@ -70,8 +70,16 @@ pub fn report() -> String {
     #[cfg(target_os = "macos")]
     let _ = writeln!(
         out,
-        "  [{}] global shortcut (event tap; needs Accessibility)",
-        mark(super::mac::permissions::accessibility() || super::mac::permissions::input_monitoring())
+        "  [{}] global shortcut (event tap; needs {})",
+        mark(super::mac::permissions::accessibility() || super::mac::permissions::input_monitoring()),
+        super::mac::permissions::accessibility_pane()
+    );
+    #[cfg(target_os = "macos")]
+    let _ = writeln!(
+        out,
+        "  [{}] clipboard restore (reading it: {:?})",
+        mark(super::clipboard_restore_allowed()),
+        super::mac::paste::read_access()
     );
     let keys = super::native_inject::NativeInjector::new();
     let _ = writeln!(out, "  [{}] keyboard simulation (paste/type)", mark(keys.has_keyboard()));

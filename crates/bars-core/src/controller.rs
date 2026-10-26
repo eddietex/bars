@@ -43,6 +43,8 @@ pub enum Command {
     MicTest(bool),
     /// Open a system settings page or link.
     OpenUrl(String),
+    /// macOS: let Bars read the clipboard, to restore it after pasting.
+    AllowClipboardReads,
     /// Downloads a model (speech or polish); one at a time, the rest wait.
     DownloadModel(String),
     CancelDownload(String),
@@ -1086,8 +1088,11 @@ impl Controller {
                 self.capturing = on;
                 self.hotkeys.set_capture(on);
                 if on && !self.hotkeys.is_active() {
-                    let what = if cfg!(target_os = "macos") { "Accessibility access" } else { "Keyboard access" };
-                    self.notice(NoticeKind::Warning, format!("{what} is needed to record a shortcut"));
+                    #[cfg(target_os = "macos")]
+                    let text = format!("Allow Bars under {} to record a shortcut", platform::mac::permissions::accessibility_pane());
+                    #[cfg(not(target_os = "macos"))]
+                    let text = "Keyboard access is needed to record a shortcut".to_string();
+                    self.notice(NoticeKind::Warning, text);
                 }
             }
             Command::ConfigureShortcut => self.hotkeys.configure(),
@@ -1106,6 +1111,18 @@ impl Controller {
                 if let Err(e) = platform::requirements::open_url(&url) {
                     self.notice(NoticeKind::Error, format!("Couldn't open settings: {e:#}"));
                 }
+            }
+            Command::AllowClipboardReads => {
+                // macOS may ask (and wait for an answer) on this thread.
+                let ui = self.ui.clone();
+                thread::spawn(move || {
+                    if let Err(e) = platform::request_clipboard_access() {
+                        let _ = ui.try_send(Event::Notice {
+                            kind: NoticeKind::Error,
+                            text: format!("Couldn't open settings: {e:#}"),
+                        });
+                    }
+                });
             }
             Command::DownloadModel(id) => self.download(id),
             Command::CancelDownload(id) => {
@@ -1651,6 +1668,12 @@ fn insert_text(
             if how == Inserted::NotRead {
                 log::info!("no app read the paste: no text field had focus");
                 return None;
+            }
+            if platform::clipboard_restore_skipped() {
+                let _ = ui.try_send(Event::Notice {
+                    kind: NoticeKind::Info,
+                    text: "The clipboard keeps your dictation: macOS asks before Bars reads it. See Restore clipboard in settings".into(),
+                });
             }
             Some(text)
         }

@@ -25,6 +25,12 @@ unsafe extern "C" {
     fn CGPreflightListenEventAccess() -> bool;
 }
 
+/// What System Settings calls the Accessibility permission (macOS 27
+/// renamed it; the settings link stayed the same).
+pub fn accessibility_pane() -> &'static str {
+    if super::os_at_least(27, 0) { "Device Control and Data Access" } else { "Accessibility" }
+}
+
 /// Accessibility: lets Bars see the shortcut and type into other apps.
 pub fn accessibility() -> bool {
     unsafe { AXIsProcessTrusted() }

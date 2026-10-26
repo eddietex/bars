@@ -165,7 +165,8 @@ fn linux_keyboard(ctx: &Context) -> Requirement {
     }
 }
 
-/// System Settings › Privacy & Security › Accessibility.
+/// System Settings › Privacy & Security › Accessibility (Device Control and
+/// Data Access on macOS 27).
 #[cfg(target_os = "macos")]
 pub const MAC_ACCESSIBILITY_SETTINGS: &str =
     "x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility";
@@ -173,9 +174,10 @@ pub const MAC_ACCESSIBILITY_SETTINGS: &str =
 #[cfg(target_os = "macos")]
 fn macos() -> Vec<Requirement> {
     use super::mac::permissions;
+    let pane = permissions::accessibility_pane();
     vec![Requirement {
         id: ReqId::Accessibility,
-        title: "Accessibility".into(),
+        title: pane.into(),
         why: "Lets Bars notice your shortcut in every app and type your words into the one you're using. \
               Turn on Bars in the list that opens. If it's already on but this still says it's needed \
               (common after an update), select Bars, remove it with −, then allow access again."
@@ -185,7 +187,7 @@ fn macos() -> Vec<Requirement> {
         actions: vec![
             FixAction::Elevate,
             FixAction::OpenSettings {
-                label: "Open Accessibility settings".into(),
+                label: format!("Open {pane} settings"),
                 url: MAC_ACCESSIBILITY_SETTINGS.into(),
             },
         ],

@@ -3,6 +3,7 @@
 //! history apps), and the Cmd+V keystroke itself.
 
 use std::ffi::c_void;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread;
 use std::time::Duration;
 
@@ -16,7 +17,8 @@ use objc2::rc::Retained;
 use objc2::runtime::ProtocolObject;
 use objc2::{AnyThread, DefinedClass, define_class, msg_send};
 use objc2_app_kit::{
-    NSFileContentsPboardType, NSPasteboard, NSPasteboardItem, NSPasteboardItemDataProvider, NSPasteboardType,
+    NSFileContentsPboardType, NSPasteboard, NSPasteboardAccessBehavior, NSPasteboardItem, NSPasteboardItemDataProvider,
+    NSPasteboardType,
     NSPasteboardTypePDF, NSPasteboardTypeRTFD, NSPasteboardTypeSound, NSPasteboardTypeString, NSPasteboardWriting,
 };
 use objc2_foundation::{NSArray, NSData, NSObject, NSObjectProtocol, NSString};
@@ -29,6 +31,66 @@ use crate::platform::paste::LazyClipboard;
 const HIDDEN_MARKERS: &[&str] = &["org.nspasteboard.ConcealedType", "org.nspasteboard.TransientType"];
 /// Types larger than this aren't kept (nor restored).
 const MAX_TYPE_BYTES: usize = 32 << 20;
+
+/// System Settings › Privacy & Security › Paste from Other Apps.
+pub const PASTE_SETTINGS: &str = "x-apple.systempreferences:com.apple.preference.security?Privacy_Pasteboard";
+
+/// Whether Bars may read the clipboard on its own, to put back what was
+/// copied.
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub enum ReadAccess {
+    Allowed,
+    /// macOS would ask first. Its "Allow" lasts one read, so it would ask
+    /// at every dictation.
+    Asks,
+    Denied,
+}
+
+/// macOS 27 asks before an app reads the clipboard on its own unless the
+/// app is set to Allow under Paste from Other Apps, and lists an app there
+/// only once it has asked about it.
+pub fn read_access() -> ReadAccess {
+    if !super::os_at_least(15, 4) {
+        return ReadAccess::Allowed;
+    }
+    match NSPasteboard::generalPasteboard().accessBehavior() {
+        NSPasteboardAccessBehavior::AlwaysAllow => ReadAccess::Allowed,
+        NSPasteboardAccessBehavior::AlwaysDeny => ReadAccess::Denied,
+        NSPasteboardAccessBehavior::Ask => ReadAccess::Asks,
+        // Never asked about Bars: macOS 15.4 to 26 don't ask at all.
+        _ if super::os_at_least(27, 0) => ReadAccess::Asks,
+        _ => ReadAccess::Allowed,
+    }
+}
+
+/// Reads the clipboard once on purpose, so macOS asks now (instead of in
+/// the middle of a dictation) and lists Bars under Paste from Other Apps.
+/// May block while macOS asks.
+pub fn ask_for_read_access() {
+    if !super::os_at_least(15, 4) {
+        return;
+    }
+    let pb = NSPasteboard::generalPasteboard();
+    if pb.accessBehavior() != NSPasteboardAccessBehavior::Default {
+        return;
+    }
+    if let Some(item) = pb.pasteboardItems().and_then(|items| items.firstObject()) {
+        if let Some(t) = item.types().firstObject() {
+            let _ = item.dataForType(&t);
+        }
+    }
+}
+
+/// A dictation stayed on the clipboard because reading it wasn't allowed,
+/// and the user hasn't been told yet.
+static SKIP_UNTOLD: AtomicBool = AtomicBool::new(false);
+static SKIP_TOLD: AtomicBool = AtomicBool::new(false);
+
+/// True once per run, after the first dictation that couldn't put the
+/// clipboard back.
+pub fn take_restore_skipped() -> bool {
+    SKIP_UNTOLD.swap(false, Ordering::Relaxed)
+}
 
 pub struct ProviderIvars {
     text: String,
@@ -90,6 +152,14 @@ impl LazyClipboard for Pasteboard {
     const ASKS_EVERY_PASTE: bool = false;
 
     fn save(&mut self) -> Option<Items> {
+        let access = read_access();
+        if access != ReadAccess::Allowed {
+            log::info!("leaving the dictation on the clipboard: reading it is {access:?}");
+            if !SKIP_TOLD.swap(true, Ordering::Relaxed) {
+                SKIP_UNTOLD.store(true, Ordering::Relaxed);
+            }
+            return None;
+        }
         let pb = NSPasteboard::generalPasteboard();
         let mut out = Items::new();
         for item in pb.pasteboardItems()?.iter() {
@@ -106,7 +176,9 @@ impl LazyClipboard for Pasteboard {
                 out.push(entries);
             }
         }
-        Some(out)
+        // Nothing read (an empty clipboard, or a read macOS turned down):
+        // putting that back would only clear the dictation off it.
+        (!out.is_empty()).then_some(out)
     }
 
     fn offer(&mut self, text: &str) -> anyhow::Result<Receiver<()>> {

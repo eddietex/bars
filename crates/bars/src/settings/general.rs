@@ -75,6 +75,19 @@ impl SettingsView {
                 state.update(cx, |s, cx| s.edit_config(cx, f));
             }
         };
+        // macOS 27 asks before Bars reads the clipboard, and its "Allow"
+        // lasts one read; only System Settings allows it for good.
+        let clipboard_row = (cfg.insertion.restore_clipboard && !bars_core::platform::clipboard_restore_allowed()).then(|| {
+            let state = state.clone();
+            row(
+                "Clipboard access",
+                Some("macOS asks before Bars reads the clipboard, so for now it keeps your dictation instead of what you had copied. Allow Bars under Paste from Other Apps."),
+                button("allow-clipboard", "Allow…", ButtonKind::Accent, p)
+                    .on_click(move |_, _, cx| state.read(cx).send(Command::AllowClipboardReads)),
+                p,
+            )
+            .into_any_element()
+        });
 
         // --- Shortcuts ---------------------------------------------------
         // Without a running shortcut listener no keys would ever arrive:
@@ -427,6 +440,9 @@ impl SettingsView {
                             p,
                         )
                         .into_any_element(),
+                    ])
+                    .chain(clipboard_row)
+                    .chain(vec![
                         row(
                             "Fit to the surrounding text",
                             Some(SMART_SPACING_HINT),
