@@ -288,6 +288,9 @@ fn app_name(focus: &Focus) -> Option<String> {
     match focus.agent {
         Some(Agent::ClaudeCode) => return Some("Claude Code".into()),
         Some(Agent::Codex) => return Some("Codex".into()),
+        Some(Agent::Droid) => return Some("Droid".into()),
+        Some(Agent::Pi) => return Some("pi".into()),
+        Some(Agent::OpenCode) => return Some("OpenCode".into()),
         None => {}
     }
     if let Some(name) = &focus.name {

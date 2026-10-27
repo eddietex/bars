@@ -1,13 +1,42 @@
-//! Finds Claude Code or Codex running below a terminal's process (in any
-//! of its tabs), for terminals whose window title doesn't name them.
+//! Finds a coding agent running below a terminal's process (in any
+//! of its tabs) or in the herdr workspace it shows, for terminals whose
+//! window title doesn't name them.
 
 use std::collections::{HashMap, HashSet, VecDeque};
 
 use super::focus::agent_from_process;
 use crate::text::Agent;
 
+/// Terminal workspaces that run their panes under a server of their own,
+/// not under the terminal that shows them.
+const MULTIPLEXERS: &[&str] = &["herdr"];
+
+/// An agent below the terminal `root`, or, when the terminal runs a
+/// multiplexer's client, in any of that multiplexer's panes (they can't be
+/// told apart from here).
+fn find_agent(
+    root: u32,
+    children: &HashMap<u32, Vec<u32>>,
+    names: &HashMap<u32, String>,
+    is_agent: impl Fn(u32) -> Option<Agent>,
+) -> Option<Agent> {
+    if let Some(agent) = walk(root, children, &is_agent) {
+        return Some(agent);
+    }
+    let is_mux = |pid: u32| {
+        names.get(&pid).is_some_and(|n| {
+            let n = n.rsplit(['/', '\\']).next().unwrap_or(n).to_ascii_lowercase();
+            MULTIPLEXERS.contains(&n.strip_suffix(".exe").unwrap_or(&n))
+        })
+    };
+    walk(root, children, |pid| is_mux(pid).then_some(()))?;
+    let mut servers: Vec<u32> = names.keys().copied().filter(|&pid| is_mux(pid)).collect();
+    servers.sort_unstable();
+    servers.into_iter().find_map(|server| walk(server, children, &is_agent))
+}
+
 /// Breadth-first through the descendants of `root`.
-fn walk(root: u32, children: &HashMap<u32, Vec<u32>>, check: impl Fn(u32) -> Option<Agent>) -> Option<Agent> {
+fn walk<T>(root: u32, children: &HashMap<u32, Vec<u32>>, check: impl Fn(u32) -> Option<T>) -> Option<T> {
     let mut queue = VecDeque::from([root]);
     // Process ids get reused, so parent links can form cycles.
     let mut seen = HashSet::from([root]);
@@ -28,16 +57,18 @@ fn walk(root: u32, children: &HashMap<u32, Vec<u32>>, check: impl Fn(u32) -> Opt
 #[cfg(target_os = "linux")]
 pub fn agent_below(root: u32) -> Option<Agent> {
     let mut children: HashMap<u32, Vec<u32>> = HashMap::new();
+    let mut names = HashMap::new();
     for entry in std::fs::read_dir("/proc").ok()?.flatten() {
         let Some(pid) = entry.file_name().to_str().and_then(|s| s.parse::<u32>().ok()) else { continue };
         let Ok(stat) = std::fs::read_to_string(entry.path().join("stat")) else { continue };
         // "pid (comm) state ppid ...", where comm may hold spaces and parentheses.
-        let Some(rest) = stat.rfind(')').map(|i| &stat[i + 1..]) else { continue };
-        if let Some(ppid) = rest.split_whitespace().nth(1).and_then(|s| s.parse::<u32>().ok()) {
+        let (Some(open), Some(close)) = (stat.find('('), stat.rfind(')')) else { continue };
+        if let Some(ppid) = stat[close + 1..].split_whitespace().nth(1).and_then(|s| s.parse::<u32>().ok()) {
             children.entry(ppid).or_default().push(pid);
+            names.insert(pid, stat[open + 1..close].to_string());
         }
     }
-    walk(root, &children, linux_agent)
+    find_agent(root, &children, &names, linux_agent)
 }
 
 /// An agent running anywhere in this session.
@@ -90,7 +121,7 @@ pub fn agent_below(root: u32) -> Option<Agent> {
         let comm: Vec<u8> = info.pbsi_comm.iter().take_while(|c| **c != 0).map(|c| *c as u8).collect();
         names.insert(pid as u32, String::from_utf8_lossy(&comm).into_owned());
     }
-    walk(root, &children, |pid| agent_from_process(names.get(&pid)?, || mac_args(pid)))
+    find_agent(root, &children, &names, |pid| agent_from_process(names.get(&pid)?, || mac_args(pid)))
 }
 
 /// A process's arguments (KERN_PROCARGS2: argc, the executable path, then
@@ -146,7 +177,7 @@ pub fn agent_below(root: u32) -> Option<Agent> {
     }
     // Another process's command line isn't readable without peeking into
     // its memory, so a Node-launched agent is only found by its title.
-    walk(root, &children, |pid| agent_from_process(names.get(&pid)?, Vec::new))
+    find_agent(root, &children, &names, |pid| agent_from_process(names.get(&pid)?, Vec::new))
 }
 
 #[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "windows")))]
@@ -154,7 +185,7 @@ pub fn agent_below(_root: u32) -> Option<Agent> {
     None
 }
 
-#[cfg(all(test, target_os = "linux"))]
+#[cfg(test)]
 mod tests {
     use super::*;
 
@@ -163,6 +194,26 @@ mod tests {
         let children = HashMap::from([(1, vec![2, 3]), (3, vec![4]), (4, vec![1])]);
         let found = walk(1, &children, |pid| (pid == 4).then_some(Agent::Codex));
         assert_eq!(found, Some(Agent::Codex));
-        assert_eq!(walk(1, &children, |_| None), None);
+        assert_eq!(walk(1, &children, |_: u32| None::<Agent>), None);
+    }
+
+    #[test]
+    fn finds_an_agent_in_herdr_panes() {
+        // Terminal 10 → shell 11 → herdr client 12; herdr server 20 (started
+        // apart) → shell 21 → claude 22. Another terminal, 30, runs a shell.
+        let children = HashMap::from([(10, vec![11]), (11, vec![12]), (20, vec![21]), (21, vec![22]), (30, vec![31])]);
+        let names = HashMap::from([
+            (10, "ghostty".to_string()),
+            (11, "zsh".to_string()),
+            (12, "herdr".to_string()),
+            (20, "herdr".to_string()),
+            (21, "zsh".to_string()),
+            (22, "claude".to_string()),
+            (30, "ghostty".to_string()),
+            (31, "zsh".to_string()),
+        ]);
+        let is_agent = |pid: u32| super::super::focus::agent_from_process(names.get(&pid)?, Vec::new);
+        assert_eq!(find_agent(10, &children, &names, is_agent), Some(Agent::ClaudeCode));
+        assert_eq!(find_agent(30, &children, &names, is_agent), None);
     }
 }

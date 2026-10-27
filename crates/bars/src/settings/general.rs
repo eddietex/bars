@@ -474,8 +474,8 @@ impl SettingsView {
                         )
                         .into_any_element(),
                         row(
-                            "Split long pastes for Claude Code and Codex",
-                            Some("In a terminal running either, long text is pasted in pieces so it shows as text instead of “[Pasted text]”."),
+                            "Split long pastes for coding agents",
+                            Some("In a terminal running Claude Code, Codex, Droid, pi or OpenCode, long text is pasted in pieces so it shows as text instead of “[Pasted text]”."),
                             small_switch("split-agents", cfg.insertion.split_for_agents, {
                                 let set = set.clone();
                                 move |v, _, cx| {

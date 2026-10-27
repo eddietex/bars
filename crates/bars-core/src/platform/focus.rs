@@ -2,7 +2,7 @@
 //! title and the text around the cursor, read through each platform's
 //! accessibility API. Smart spacing fits the dictation into that text; the
 //! app, title and its child processes tell whether a terminal is running
-//! Claude Code or Codex.
+//! a coding agent.
 //!
 //! Field text is sensitive: it lives in memory for one dictation and is
 //! never logged or saved.
@@ -148,7 +148,7 @@ pub(super) fn is_terminal(app: &str) -> bool {
     }
 }
 
-/// Claude Code or Codex in the focused terminal: named in the window title,
+/// A coding agent in the focused terminal: named in the window title,
 /// or running below the terminal's process.
 fn coding_agent(focus: &Focus) -> Option<Agent> {
     let Some(app) = focus.app.as_deref() else {
@@ -180,6 +180,10 @@ pub(super) fn agent_from_process(name: &str, args: impl Fn() -> Vec<String>) -> 
     let of = |s: &str| match stem(s).as_str() {
         "claude" | "claude.js" | "cli.js" if s.contains("claude") => Some(Agent::ClaudeCode),
         "codex" | "codex.js" => Some(Agent::Codex),
+        "droid" => Some(Agent::Droid),
+        "opencode" => Some(Agent::OpenCode),
+        "pi" => Some(Agent::Pi),
+        "cli.js" if s.contains("pi-coding-agent") => Some(Agent::Pi),
         _ => None,
     };
     if let Some(a) = of(name) {
@@ -207,5 +211,12 @@ mod tests {
         assert_eq!(agent_from_process("node", args), Some(Agent::Codex));
         let args = || vec!["node".into(), "server.js".into()];
         assert_eq!(agent_from_process("node", args), None);
+        assert_eq!(agent_from_process("droid", none), Some(Agent::Droid));
+        assert_eq!(agent_from_process("opencode.exe", none), Some(Agent::OpenCode));
+        let args = || vec!["node".into(), "/opt/homebrew/Cellar/pi-coding-agent/0.99.1/libexec/bin/pi".into()];
+        assert_eq!(agent_from_process("node", args), Some(Agent::Pi));
+        let args = || vec!["node".into(), "/usr/lib/node_modules/@earendil-works/pi-coding-agent/dist/bundle/cli.js".into()];
+        assert_eq!(agent_from_process("node", args), Some(Agent::Pi));
+        assert_eq!(agent_from_process("android", none), None);
     }
 }

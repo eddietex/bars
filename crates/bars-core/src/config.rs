@@ -214,8 +214,9 @@ pub struct InsertionConfig {
     /// Read the text around the cursor (accessibility) to fit spacing,
     /// capitalization and the final full stop into the sentence.
     pub smart_spacing: bool,
-    /// Paste long text into Claude Code or Codex in pieces, so it shows as
-    /// text instead of "[Pasted text]".
+    /// Paste long text into a terminal coding agent (Claude Code, Codex,
+    /// Droid, pi, OpenCode) in pieces, so it shows as text instead of
+    /// "[Pasted text]".
     pub split_for_agents: bool,
 }
 

@@ -336,22 +336,31 @@ pub fn fit_to_field(text: &str, field: &Surroundings, trailing_space: bool, name
 pub enum Agent {
     ClaudeCode,
     Codex,
+    Droid,
+    Pi,
+    OpenCode,
 }
 
 /// Splits a long paste so a terminal coding agent shows it as text rather
-/// than collapsing it into "[Pasted text]": Claude Code gets pieces of at
-/// most 600 characters and 2 line breaks, Codex pieces of 1000 characters.
-/// The pieces join back into exactly `text`.
+/// than collapsing it into a "[Pasted text]" placeholder. The pieces join
+/// back into exactly `text`.
 pub fn split_for_agent(text: &str, agent: Agent) -> Vec<String> {
     let chars = text.chars().count();
-    match agent {
-        Agent::ClaudeCode if chars > 600 || text.matches('\n').count() >= 3 => split_at_lines(text, 600, 2),
-        Agent::Codex if chars > 1000 => {
-            let v: Vec<char> = text.chars().collect();
-            v.chunks(1000).map(|c| c.iter().collect()).collect()
-        }
-        _ => vec![text.to_string()],
-    }
+    let breaks = text.matches('\n').count();
+    // Whether the agent shows the paste whole, and the pieces it gets
+    // otherwise. The JavaScript agents count UTF-16 units (an emoji is
+    // two), hence pieces a little under their limits.
+    let (whole, max_chars, max_breaks) = match agent {
+        Agent::ClaudeCode => (chars <= 600 && breaks < 3, 600, 2),
+        Agent::Codex => (chars <= 1000, 1000, usize::MAX),
+        // Collapses above 400 characters or 8 lines.
+        Agent::Droid => (chars <= 400 && breaks < 8, 350, 7),
+        // Collapses above 1000 characters or 10 lines.
+        Agent::Pi => (chars <= 1000 && breaks < 10, 900, 9),
+        // Collapses above 150 characters or from 3 lines.
+        Agent::OpenCode => (chars <= 150 && breaks < 2, 140, 1),
+    };
+    if whole { vec![text.to_string()] } else { split_at_lines(text, max_chars, max_breaks) }
 }
 
 /// Pieces of at most `max_chars` characters and `max_breaks` line breaks,
@@ -497,6 +506,24 @@ mod tests {
         }
         assert_eq!(split_for_agent(&"é".repeat(2500), Agent::Codex).len(), 3);
         assert_eq!(split_for_agent("short\n\n\n\nlines", Agent::Codex).len(), 1);
+    }
+
+    #[test]
+    fn splits_long_pastes_for_other_agents() {
+        let text = (0..40).map(|i| format!("line {i} {}", "w".repeat(i * 7))).collect::<Vec<_>>().join("\n");
+        for (agent, max_chars, max_breaks) in [(Agent::Droid, 350, 7), (Agent::Pi, 900, 9), (Agent::OpenCode, 140, 1)] {
+            let pieces = split_for_agent(&text, agent);
+            assert_eq!(pieces.concat(), text, "{agent:?}");
+            assert!(pieces.len() > 1, "{agent:?}");
+            for p in &pieces {
+                assert!(p.chars().count() <= max_chars && p.matches('\n').count() <= max_breaks, "{agent:?} {p:?}");
+            }
+        }
+        let short = "one\ntwo\nthree four five";
+        assert_eq!(split_for_agent(short, Agent::Droid), vec![short]);
+        assert_eq!(split_for_agent(short, Agent::Pi), vec![short]);
+        assert_eq!(split_for_agent(short, Agent::OpenCode), vec!["one\ntwo", "\nthree four five"]);
+        assert_eq!(split_for_agent("a\nb", Agent::OpenCode), vec!["a\nb"]);
     }
 
     #[test]

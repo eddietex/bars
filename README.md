@@ -46,8 +46,9 @@ and if Bars crashes meanwhile, its next start turns it back on.
 Bars reads the text around the cursor through the accessibility API, to add
 a space only where one is needed, continue a sentence in lowercase and drop
 the full stop when the sentence carries on (on Linux this works in apps with
-accessibility support, such as GTK apps). Long text pasted into Claude Code
-or Codex goes in pieces, so it shows as text instead of "[Pasted text]". If
+accessibility support, such as GTK apps). Long text pasted into a coding
+agent in a terminal (Claude Code, Codex, Droid, pi or OpenCode, also inside
+herdr) goes in pieces, so it shows as text instead of "[Pasted text]". If
 no text box had focus, the pill says so and offers the text to copy. Pasted
 text is kept out of clipboard-history apps, and everything you had copied
 (images and files too) comes back afterwards. macOS 27 asks before an app
