@@ -36,7 +36,14 @@
     <internet>first-run</internet>
   </requires>
   <releases>
-    <release version="0.7.5" date="2026-10-26">
+    <release version="0.7.6" date="2026-10-26">
+      <description>
+        <ul>
+          <li>Long dictations paste as text, not a collapsed placeholder, in Droid, pi and OpenCode too, besides Claude Code and Codex. The setting is now called Split long pastes for coding agents.</li>
+          <li>Coding agents running in a herdr pane are found too.</li>
+        </ul>
+      </description>
+    </release>    <release version="0.7.5" date="2026-10-26">
       <description>
         <ul>
           <li>macOS 27: Bars no longer says it needs Device Control and Data Access when it already has it and works. Some Macs report the permission as off while it's on; Bars now also checks what it can actually do.</li>
