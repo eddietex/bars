@@ -36,7 +36,7 @@
     <internet>first-run</internet>
   </requires>
   <releases>
-    <release version="0.7.6" date="2026-10-26">
+    <release version="0.7.6" date="2026-10-27">
       <description>
         <ul>
           <li>Long dictations paste as text, not a collapsed placeholder, in Droid, pi and OpenCode too, besides Claude Code and Codex. The setting is now called Split long pastes for coding agents.</li>
