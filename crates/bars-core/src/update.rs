@@ -1,6 +1,7 @@
 //! Updates. Bars only tells the user that a newer version is published and
-//! installs it when they ask: on macOS and Windows it replaces itself, on
-//! Linux (and builds that can't replace themselves) the release page opens.
+//! installs it when they ask: on macOS, Windows and Linux (the tarball's
+//! `bin/bars`, wherever it was put) it replaces itself; for the Flatpak and
+//! builds that can't replace themselves the release page opens.
 //!
 //! What's published is read from a small manifest on GitHub Releases,
 //! `latest.json`, attached to every release by the release workflow. A
@@ -59,9 +60,14 @@ fn newer(current: &str, manifest: Manifest) -> Option<Release> {
     })
 }
 
+/// This program's path, read once: after an update replaced it, Linux names
+/// the running one "… (deleted)".
+#[cfg(target_os = "linux")]
+static EXE: std::sync::LazyLock<Option<std::path::PathBuf>> = std::sync::LazyLock::new(|| std::env::current_exe().ok());
+
 /// Whether this copy can install an update itself: an installed app with a
 /// key to verify updates. A build run from source can't (its folder would
-/// be replaced), and neither can Linux, where packages update elsewhere.
+/// be replaced), and neither can the Flatpak, which Flatpak updates.
 pub fn can_install() -> bool {
     !PUBLIC_KEY.is_empty() && installed_app()
 }
@@ -83,12 +89,18 @@ fn installed_app() -> bool {
 
 #[cfg(target_os = "linux")]
 fn installed_app() -> bool {
-    false
+    // A package installed where Bars can't write (/usr/bin) is updated by
+    // its package manager.
+    !std::path::Path::new("/.flatpak-info").exists()
+        && EXE.as_deref().is_some_and(|exe| {
+            !exe.ancestors().any(|dir| dir.ends_with("target"))
+                && exe.parent().is_some_and(|dir| nix::unistd::access(dir, nix::unistd::AccessFlags::W_OK).is_ok())
+        })
 }
 
 /// Downloads, verifies and installs the latest release. Windows: the
-/// installer takes over and this process exits. macOS: the app is replaced
-/// on disk; call `relaunch_after_exit` and quit.
+/// installer takes over and this process exits. macOS and Linux: Bars is
+/// replaced on disk; to restart into it, call `relaunch_after_exit` and quit.
 #[cfg(any(target_os = "macos", target_os = "windows"))]
 pub fn install() -> anyhow::Result<()> {
     use cargo_packager_updater::{Config, WindowsConfig, WindowsUpdateInstallMode};
@@ -110,27 +122,114 @@ pub fn install() -> anyhow::Result<()> {
     Ok(())
 }
 
+/// Linux: the tarball's `bin/bars` replaces this program. The tarballs are
+/// listed in the manifest under `tarballs`, not `platforms`, whose formats
+/// the macOS and Windows updater checks.
 #[cfg(target_os = "linux")]
 pub fn install() -> anyhow::Result<()> {
-    Err(anyhow!("this copy of Bars can't update itself"))
+    use std::collections::HashMap;
+    use std::io::Read;
+    use std::os::unix::fs::OpenOptionsExt;
+
+    #[derive(Deserialize)]
+    struct Tarball {
+        url: String,
+        signature: String,
+    }
+    #[derive(Deserialize)]
+    struct LinuxManifest {
+        version: String,
+        #[serde(default)]
+        tarballs: HashMap<String, Tarball>,
+    }
+
+    if !can_install() {
+        return Err(anyhow!("this copy of Bars can't update itself"));
+    }
+    let exe = EXE.clone().ok_or_else(|| anyhow!("can't find this program"))?;
+    let agent = crate::models::http_agent();
+    let body = agent.get(&manifest_url()).call()?.body_mut().read_to_string().context("reading the release manifest")?;
+    let mut manifest: LinuxManifest = serde_json::from_str(&body).context("reading the release manifest")?;
+    let latest = Version::parse(manifest.version.trim_start_matches('v'))?;
+    if latest <= Version::parse(env!("CARGO_PKG_VERSION"))? {
+        return Err(anyhow!("no newer version"));
+    }
+    let target = format!("linux-{}", std::env::consts::ARCH);
+    let tarball = manifest.tarballs.remove(&target).ok_or_else(|| anyhow!("no update for {target}"))?;
+    log::info!("installing Bars {latest}");
+    let mut archive = Vec::new();
+    agent
+        .get(&tarball.url)
+        .call()?
+        .body_mut()
+        .with_config()
+        .limit(u64::MAX)
+        .reader()
+        .read_to_end(&mut archive)
+        .context("downloading the update")?;
+    verify(&archive, &tarball.signature, PUBLIC_KEY).context("checking the update's signature")?;
+
+    let mut tar = tar::Archive::new(flate2::read::GzDecoder::new(archive.as_slice()));
+    for entry in tar.entries()? {
+        let mut entry = entry?;
+        if !entry.path()?.ends_with("bin/bars") {
+            continue;
+        }
+        // Written next to Bars and renamed over it, so it's never half there.
+        let tmp = exe.with_file_name(".bars-update");
+        let result = (|| {
+            let mut file = std::fs::OpenOptions::new().write(true).create(true).truncate(true).mode(0o755).open(&tmp)?;
+            std::io::copy(&mut entry, &mut file)?;
+            file.sync_all()?;
+            std::fs::rename(&tmp, &exe)
+        })();
+        if result.is_err() {
+            let _ = std::fs::remove_file(&tmp);
+        }
+        return result.context("replacing Bars");
+    }
+    Err(anyhow!("the update has no bin/bars"))
 }
 
-/// macOS: opens the app (replaced, perhaps) once this process has exited.
-/// One that hasn't after 10 s is stuck (in the audio system, say) and is
-/// killed.
-#[cfg(target_os = "macos")]
+/// Checks `data` against a signature from `cargo packager signer sign`, as
+/// the macOS and Windows updater does: both it and the key are base64 of
+/// minisign's text files.
+#[cfg(target_os = "linux")]
+fn verify(data: &[u8], signature: &str, key: &str) -> anyhow::Result<()> {
+    use base64::Engine;
+    let text = |b64: &str| -> anyhow::Result<String> {
+        Ok(String::from_utf8(base64::engine::general_purpose::STANDARD.decode(b64.trim())?)?)
+    };
+    let key = minisign_verify::PublicKey::decode(&text(key)?)?;
+    let signature = minisign_verify::Signature::decode(&text(signature)?)?;
+    key.verify(data, &signature, true)?;
+    Ok(())
+}
+
+/// macOS and Linux: starts Bars (replaced, perhaps) again once this process
+/// has exited. One that hasn't after 10 s is stuck (in the audio system,
+/// say) and is killed.
+#[cfg(any(target_os = "macos", target_os = "linux"))]
 pub fn relaunch_after_exit() -> anyhow::Result<()> {
-    let exe = std::env::current_exe()?;
-    let app = exe
-        .ancestors()
-        .nth(3)
-        .filter(|p| p.extension().is_some_and(|e| e == "app"))
-        .ok_or_else(|| anyhow!("not inside an app"))?;
-    let script = r#"i=0; while kill -0 "$1" 2>/dev/null; do i=$((i+1)); [ "$i" -gt 50 ] && kill -9 "$1"; sleep 0.2; done; open "$2""#;
+    #[cfg(target_os = "macos")]
+    let (start, target) = {
+        let exe = std::env::current_exe()?;
+        let app = exe
+            .ancestors()
+            .nth(3)
+            .filter(|p| p.extension().is_some_and(|e| e == "app"))
+            .ok_or_else(|| anyhow!("not inside an app"))?
+            .to_path_buf();
+        (r#"open "$2""#, app)
+    };
+    #[cfg(target_os = "linux")]
+    let (start, target) = (r#"exec "$2""#, EXE.clone().ok_or_else(|| anyhow!("can't find this program"))?);
+    let script = format!(r#"i=0; while kill -0 "$1" 2>/dev/null; do i=$((i+1)); [ "$i" -gt 50 ] && kill -9 "$1"; sleep 0.2; done; {start}"#);
     std::process::Command::new("/bin/sh")
-        .args(["-c", script, "sh"])
+        .args(["-c", &script, "sh"])
         .arg(std::process::id().to_string())
-        .arg(app)
+        .arg(target)
+        .stdin(std::process::Stdio::null())
         .spawn()?;
     Ok(())
 }
@@ -162,5 +261,17 @@ mod tests {
         )
         .unwrap();
         assert_eq!(newer("0.3.0", m), Some(Release { version: "0.3.1".into(), notes: Some("Fixes".into()) }));
+    }
+
+    /// Signed by `cargo packager signer sign`, as the release workflow does,
+    /// with a throwaway key.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn checks_update_signatures() {
+        const KEY: &str = "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDMwNjZCNDUzOERDODcxMUMKUldRY2NjaU5VN1JtTUl4SGR1QjU0eno2MkZTOWNyWWxSdklTN1Y5eE5ORzVFSXFPUVkvL2pxNDgK";
+        const SIGNATURE: &str = "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIGNhcmdvLXBhY2thZ2VyIHNlY3JldCBrZXkKUlVRY2NjaU5VN1JtTUJkWiswMThBSUE1eEVtQjlhWU1wUWcvb0VWZHVzSzVQVzhqeXhxOU1qbUtmcVVQb2hoYk5tVnhuZHhPUEFxdmM2a3hCMFhtd0tPalFuRXJoYXU5cHdvPQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzkzMjQ4MTg4CWZpbGU6cGF5bG9hZAo4d0p5emNVeEV0eDRaU0xTY1N6VW4wNWdUcy9Zc2RHMktQQXAvcjh1Sm1KNWRubS96YXN1aDBGd3VvK0IwMFcwTnQxa1lIaHAwMnFFVVBJcG9jSDZDQT09Cg==";
+        assert!(verify(b"Bars update", SIGNATURE, KEY).is_ok());
+        assert!(verify(b"Bars updatf", SIGNATURE, KEY).is_err());
+        assert!(verify(b"Bars update", SIGNATURE, PUBLIC_KEY).is_err());
     }
 }

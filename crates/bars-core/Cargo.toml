@@ -50,6 +50,10 @@ wayland-protocols = { version = "0.32", features = ["client", "staging"] }
 wayland-protocols-wlr = { version = "0.3", features = ["client"] }
 # Muting other apps while dictating (cpal's PulseAudio client, used directly).
 pulseaudio = "0.3"
+minisign-verify = "0.2"
+base64 = "0.22"
+flate2 = "1"
+tar = "0.4"
 
 [target.'cfg(any(target_os = "windows", target_os = "macos"))'.dependencies]
 enigo = "0.6"

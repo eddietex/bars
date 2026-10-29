@@ -80,8 +80,10 @@ looks for a newer version: it fetches a small file (`latest.json`) from
 the latest GitHub release, and sends nothing else. It
 only tells you, with a notification and in the tray menu; nothing is
 installed until you choose Update (tray menu, settings, or `bars --update`).
-On macOS and Windows that downloads the new version, checks its signature,
-installs it and restarts Bars; on Linux it opens the release page. The
+That downloads the new version, checks its signature and installs it. On
+Windows the installer then restarts Bars; on macOS and Linux (the tarball)
+Bars asks whether to restart into it now. The Flatpak, and a copy installed
+where Bars can't write (`/usr/bin`), open the release page instead. The
 daily check can be turned off in the settings, under Updates.
 
 ## Speech models

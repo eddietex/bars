@@ -182,10 +182,16 @@ impl Shell {
                     self.notify_update(cx);
                 }
             }
-            StateEvent::UpdateInstalled => {
-                #[cfg(target_os = "macos")]
+            StateEvent::UpdateInstalled if cfg!(target_os = "windows") => {
+                self.on_command(ShellCommand::Quit, cx);
+                return;
+            }
+            StateEvent::UpdateInstalled => self.ask_to_restart(cx),
+            StateEvent::RestartToUpdate => {
+                #[cfg(not(target_os = "windows"))]
                 if let Err(e) = bars_core::update::relaunch_after_exit() {
                     log::error!("could not restart into the update: {e:#}");
+                    return;
                 }
                 self.on_command(ShellCommand::Quit, cx);
                 return;
@@ -281,6 +287,43 @@ impl Shell {
             }
         })
         .detach();
+    }
+
+    /// Asks whether to restart into the update just installed: in the
+    /// settings window when it's open, otherwise in a notification.
+    fn ask_to_restart(&mut self, cx: &mut Context<Self>) {
+        let Some(version) = self.state.read(cx).update.offered().map(|r| r.version.clone()) else {
+            return;
+        };
+        let title = format!("Bars ver. {version} is installed");
+        let body = "Restart Bars to start using it.";
+        let asked = self.settings.and_then(|h| {
+            h.update(cx, |_, window, cx| {
+                window.activate_window();
+                window.prompt(PromptLevel::Info, &title, Some(body), &["Restart", "Later"], cx)
+            })
+            .ok()
+        });
+        match asked {
+            Some(answer) => {
+                let state = self.state.clone();
+                cx.spawn(async move |_, cx| {
+                    if answer.await == Ok(0) {
+                        let _ = state.update(cx, |s, cx| s.install_update(cx));
+                    }
+                })
+                .detach();
+            }
+            None => cx.show_system_notification(SystemNotification {
+                tag: UPDATE_NOTIFICATION.into(),
+                title: title.into(),
+                body: body.into(),
+                actions: vec![SystemNotificationAction {
+                    id: "restart".into(),
+                    label: "Restart".into(),
+                }],
+            }),
+        }
     }
 
     /// Tells the user what looking for an update found.
@@ -496,7 +539,9 @@ impl Shell {
             ShellCommand::ShowSettings(page) => self.show_settings(page, cx),
             ShellCommand::ShowOnboarding => self.show_onboarding(cx),
             ShellCommand::Update => self.state.update(cx, |s, cx| match s.update {
-                UpdateStatus::Available(_) | UpdateStatus::InstallFailed(..) => s.install_update(cx),
+                UpdateStatus::Available(_) | UpdateStatus::InstallFailed(..) | UpdateStatus::Installed(_) => {
+                    s.install_update(cx)
+                }
                 _ => s.check_for_updates(true, cx),
             }),
             ShellCommand::Quit => {

@@ -211,6 +211,7 @@ impl SettingsView {
         let (detail, action) = match status {
             UpdateStatus::Installing(_) => (format!("Installing ver. {version}…"), None),
             UpdateStatus::InstallFailed(..) => ("Couldn't install".to_string(), Some("Try again")),
+            UpdateStatus::Installed(_) => (format!("ver. {version} installed"), Some("Restart")),
             _ => (format!("ver. {version}"), Some(crate::shell::update_action())),
         };
         let state = self.state.clone();

@@ -108,6 +108,7 @@ impl Overlay {
                 | StateEvent::UpdateFound
                 | StateEvent::UpdateResult
                 | StateEvent::UpdateInstalled
+                | StateEvent::RestartToUpdate
                 | StateEvent::Restart => {}
             }),
         ];

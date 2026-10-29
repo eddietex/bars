@@ -43,8 +43,11 @@ pub enum StateEvent {
     UpdateFound,
     /// A check the user asked for found nothing, or installing failed.
     UpdateResult,
-    /// macOS: the update is in place; restart into it.
+    /// The update is in place: Windows' installer takes over from here;
+    /// elsewhere Bars asks whether to restart into it.
     UpdateInstalled,
+    /// The user chose to restart into the installed update.
+    RestartToUpdate,
     /// macOS: audio needs a fresh start of Bars.
     Restart,
 }
@@ -60,14 +63,20 @@ pub enum UpdateStatus {
     Installing(Release),
     /// Installing failed; it can be tried again.
     InstallFailed(Release, String),
+    /// In place; it runs once Bars restarts.
+    Installed(Release),
     Failed(String),
 }
 
 impl UpdateStatus {
-    /// The newer release on offer: found, installing, or to try again.
+    /// The newer release on offer: found, installing, to try again, or to
+    /// restart into.
     pub fn offered(&self) -> Option<&Release> {
         match self {
-            UpdateStatus::Available(r) | UpdateStatus::Installing(r) | UpdateStatus::InstallFailed(r, _) => Some(r),
+            UpdateStatus::Available(r)
+            | UpdateStatus::Installing(r)
+            | UpdateStatus::InstallFailed(r, _)
+            | UpdateStatus::Installed(r) => Some(r),
             _ => None,
         }
     }
@@ -172,7 +181,9 @@ impl AppState {
     /// so the outcome is always reported; otherwise only a version not yet
     /// announced is.
     pub fn check_for_updates(&mut self, asked: bool, cx: &mut Context<Self>) {
-        if matches!(self.update, UpdateStatus::Checking | UpdateStatus::Installing(_)) {
+        // Installed: this copy is still the old version, so a look would offer
+        // the update again.
+        if matches!(self.update, UpdateStatus::Checking | UpdateStatus::Installing(_) | UpdateStatus::Installed(_)) {
             return;
         }
         self.update_tried = Some(SystemTime::now());
@@ -225,11 +236,15 @@ impl AppState {
         }
     }
 
-    /// Installs the available update, or opens the release page where this
-    /// copy can't update itself.
+    /// Installs the available update, restarts into an installed one, or
+    /// opens the release page where this copy can't update itself.
     pub fn install_update(&mut self, cx: &mut Context<Self>) {
         let release = match &self.update {
             UpdateStatus::Available(r) | UpdateStatus::InstallFailed(r, _) => r.clone(),
+            UpdateStatus::Installed(_) => {
+                cx.emit(StateEvent::RestartToUpdate);
+                return;
+            }
             _ => return,
         };
         if !update::can_install() {
@@ -247,7 +262,10 @@ impl AppState {
             let result = rx.recv().await.unwrap_or_else(|_| Err(anyhow::anyhow!("the installer stopped")));
             let _ = this.update(cx, |s, cx| {
                 match result {
-                    Ok(()) => cx.emit(StateEvent::UpdateInstalled),
+                    Ok(()) => {
+                        s.update = UpdateStatus::Installed(release);
+                        cx.emit(StateEvent::UpdateInstalled);
+                    }
                     Err(e) => {
                         log::error!("installing Bars {} failed: {e:#}", release.version);
                         let why = format!("Couldn't install ver. {}.", release.version);

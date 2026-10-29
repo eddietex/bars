@@ -100,10 +100,22 @@ jobs:
           cp packaging/linux/70-bars.rules $dir/udev/
           cp README.md LICENSE THIRD_PARTY_NOTICES.txt $dir/
           tar czf $dir.tar.gz $dir
+      # The in-app updater checks downloads against this signature.
+      # Skipped without the key (forks).
+      - name: Sign for the updater
+        env:
+          BARS_UPDATER_KEY: ${{ secrets.UPDATER_PRIVATE_KEY }}
+          BARS_UPDATER_KEY_PASSWORD: ${{ secrets.UPDATER_PRIVATE_KEY_PASSWORD }}
+        run: |
+          [ -n "$BARS_UPDATER_KEY" ] || exit 0
+          cargo install cargo-packager --locked --version 0.11.8
+          cargo packager signer sign -k "$BARS_UPDATER_KEY" --password "$BARS_UPDATER_KEY_PASSWORD" bars-linux-${{ matrix.arch }}.tar.gz
       - uses: actions/upload-artifact@v4
         with:
           name: linux-tarball-${{ matrix.arch }}
-          path: bars-linux-${{ matrix.arch }}.tar.gz
+          path: |
+            bars-linux-${{ matrix.arch }}.tar.gz
+            bars-linux-${{ matrix.arch }}.tar.gz.sig
 
   windows:
     name: Windows (installer, ${{ matrix.arch }})

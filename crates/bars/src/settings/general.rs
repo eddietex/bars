@@ -210,11 +210,13 @@ impl SettingsView {
             UpdateStatus::UpToDate => "Up to date.".into(),
             UpdateStatus::Available(r) => format!("ver. {} is available.", r.version),
             UpdateStatus::Installing(r) => format!("Installing ver. {}…", r.version),
+            UpdateStatus::Installed(r) => format!("ver. {} is installed. Restart Bars to use it.", r.version),
             UpdateStatus::InstallFailed(_, why) | UpdateStatus::Failed(why) => why.clone(),
         };
         let update_button = match &update {
             UpdateStatus::Available(_) => button("update", crate::shell::update_action(), ButtonKind::Primary, p),
             UpdateStatus::InstallFailed(..) => button("update", "Try again", ButtonKind::Primary, p),
+            UpdateStatus::Installed(_) => button("update", "Restart", ButtonKind::Primary, p),
             UpdateStatus::Checking | UpdateStatus::Installing(_) => {
                 button("update", "Check now", ButtonKind::Secondary, p).opacity(0.5)
             }
@@ -224,7 +226,9 @@ impl SettingsView {
             let state = state.clone();
             move |_, _, cx| {
                 state.update(cx, |s, cx| match s.update {
-                    UpdateStatus::Available(_) | UpdateStatus::InstallFailed(..) => s.install_update(cx),
+                    UpdateStatus::Available(_) | UpdateStatus::InstallFailed(..) | UpdateStatus::Installed(_) => {
+                        s.install_update(cx)
+                    }
                     _ => s.check_for_updates(true, cx),
                 })
             }
