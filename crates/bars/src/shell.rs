@@ -7,6 +7,7 @@ use gpui_kit::*;
 use bars_core::config::OverlayMode;
 use bars_core::controller::{Command, Phase};
 use bars_core::models;
+use bars_core::update::Release;
 
 use crate::brand::TrayState;
 use crate::onboarding::{self, Step};
@@ -182,25 +183,21 @@ impl Shell {
                     self.notify_update(cx);
                 }
             }
+            // Windows: the installer takes over. macOS: the old app keeps
+            // running from a bundle that's been replaced, so it restarts
+            // right away. Linux keeps running the old binary until asked.
             StateEvent::UpdateInstalled if cfg!(target_os = "windows") => {
                 self.on_command(ShellCommand::Quit, cx);
                 return;
             }
+            StateEvent::UpdateInstalled if cfg!(target_os = "macos") => self.restart_when_idle(Duration::ZERO, cx),
             StateEvent::UpdateInstalled => self.ask_to_restart(cx),
-            StateEvent::RestartToUpdate => {
-                #[cfg(not(target_os = "windows"))]
-                if let Err(e) = bars_core::update::relaunch_after_exit() {
-                    log::error!("could not restart into the update: {e:#}");
-                    return;
-                }
-                self.on_command(ShellCommand::Quit, cx);
-                return;
-            }
-            StateEvent::Restart => self.restart_when_idle(cx),
+            StateEvent::RestartToUpdate => self.restart_when_idle(Duration::ZERO, cx),
+            StateEvent::Restart => self.restart_when_idle(Duration::from_secs(3), cx),
         }
         if let Some(t) = &mut self.tray {
             let st = self.state.read(cx);
-            t.set_update(st.update.offered().map(|r| r.version.clone()));
+            t.set_update(update_label(&st.update));
         }
         let needs = {
             let st = self.state.read(cx);
@@ -211,14 +208,14 @@ impl Shell {
         }
     }
 
-    /// Restarts Bars once the notice saying so has been up a while and no
-    /// dictation is under way.
-    fn restart_when_idle(&mut self, cx: &mut Context<Self>) {
+    /// Restarts Bars once no dictation is under way, and not before `after`
+    /// (a notice saying so has been up a while).
+    fn restart_when_idle(&mut self, after: Duration, cx: &mut Context<Self>) {
         if std::mem::replace(&mut self.restarting, true) {
             return;
         }
         cx.spawn(async move |this, cx| {
-            cx.background_executor().timer(Duration::from_secs(3)).await;
+            cx.background_executor().timer(after).await;
             loop {
                 match this.update(cx, |this, cx| this.state.read(cx).phase == Phase::Idle) {
                     Ok(true) => break,
@@ -227,10 +224,16 @@ impl Shell {
                 }
             }
             let _ = this.update(cx, |this, cx| {
-                #[cfg(target_os = "macos")]
+                #[cfg(any(target_os = "macos", target_os = "linux"))]
                 if let Err(e) = bars_core::update::relaunch_after_exit() {
                     log::error!("could not restart Bars: {e:#}");
                     this.restarting = false;
+                    cx.show_system_notification(SystemNotification {
+                        tag: UPDATE_NOTIFICATION.into(),
+                        title: "Bars couldn't restart".into(),
+                        body: "Quit Bars and open it again.".into(),
+                        actions: Vec::new(),
+                    });
                     return;
                 }
                 this.on_command(ShellCommand::Quit, cx);
@@ -309,7 +312,7 @@ impl Shell {
                 let state = self.state.clone();
                 cx.spawn(async move |_, cx| {
                     if answer.await == Ok(0) {
-                        let _ = state.update(cx, |s, cx| s.install_update(cx));
+                        state.update(cx, |s, cx| s.install_update(cx));
                     }
                 })
                 .detach();
@@ -336,7 +339,7 @@ impl Shell {
                     Some(notes) => format!("ver. {}: {notes}", r.version),
                     None => format!("ver. {} is out. You have ver. {current}.", r.version),
                 },
-                Some(update_action()),
+                Some(update_action(r)),
             ),
             UpdateStatus::UpToDate => ("Bars is up to date".into(), format!("ver. {current} is the latest version."), None),
             UpdateStatus::InstallFailed(_, why) => ("Bars couldn't update".into(), why.clone(), Some("Try again")),
@@ -552,17 +555,22 @@ impl Shell {
     }
 }
 
-/// What updating does here: installs, or opens the release page.
-pub fn update_action() -> &'static str {
-    if bars_core::update::can_install() { "Update" } else { "Download" }
+/// What updating to `release` does here: installs it, or opens the release
+/// page.
+pub fn update_action(release: &Release) -> &'static str {
+    if release.installable() { "Update" } else { "Download" }
 }
 
-/// The tray's update item: "Update to ver. 0.4.0…" once one is found.
-pub fn update_label(version: Option<&str>) -> String {
-    match version {
-        Some(v) if bars_core::update::can_install() => format!("Update to ver. {v}…"),
-        Some(v) => format!("Download ver. {v}…"),
-        None => "Check for Updates…".into(),
+/// The tray's update item: "Update to ver. 0.4.0…" once one is found, and
+/// a restart once it's installed.
+pub fn update_label(status: &UpdateStatus) -> String {
+    match status {
+        UpdateStatus::Installed(_) => "Restart to Finish Updating".into(),
+        _ => match status.offered() {
+            Some(r) if r.installable() => format!("Update to ver. {}…", r.version),
+            Some(r) => format!("Download ver. {}…", r.version),
+            None => "Check for Updates…".into(),
+        },
     }
 }
 

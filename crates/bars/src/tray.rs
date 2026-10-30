@@ -7,8 +7,8 @@ use crate::shell::ShellCommand;
 pub struct Tray {
     state: TrayState,
     needs_setup: bool,
-    /// The newer version on offer, if any.
-    update: Option<String>,
+    /// The update item's label (`shell::update_label`).
+    update: String,
     tx: async_channel::Sender<ShellCommand>,
 }
 
@@ -111,7 +111,7 @@ impl ksni::Tray for Tray {
             }
             .into(),
             StandardItem {
-                label: crate::shell::update_label(self.update.as_deref()),
+                label: self.update.clone(),
                 activate: Box::new(|t: &mut Self| {
                     let _ = t.tx.send_blocking(ShellCommand::Update);
                 }),
@@ -141,7 +141,7 @@ impl TrayHandle {
         let tray = Tray {
             state: TrayState::Idle,
             needs_setup: false,
-            update: None,
+            update: crate::shell::update_label(&crate::state::UpdateStatus::Unknown),
             tx,
         };
         // Inside Flatpak the well-known name can't be owned; ksni handles that.
@@ -158,10 +158,10 @@ impl TrayHandle {
         self.0.update(|t| t.state = state);
     }
 
-    pub fn set_update(&mut self, version: Option<String>) {
+    pub fn set_update(&mut self, label: String) {
         self.0.update(|t| {
-            if t.update != version {
-                t.update = version;
+            if t.update != label {
+                t.update = label;
             }
         });
     }

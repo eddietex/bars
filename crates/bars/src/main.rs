@@ -112,6 +112,8 @@ impl std::io::Write for Tee {
 }
 
 fn main() {
+    // Where Bars started from, read before an update can replace it.
+    bars_core::paths::exe();
     // Windows: still print to the terminal Bars was started from, if any
     // (`bars --doctor`, errors, logs).
     #[cfg(target_os = "windows")]

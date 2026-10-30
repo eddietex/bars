@@ -14,7 +14,7 @@ pub struct TrayHandle {
     toggle: MenuItem,
     setup: MenuItem,
     update: MenuItem,
-    update_version: Option<String>,
+    update_label: String,
     menu: Menu,
     needs_setup: bool,
 }
@@ -52,7 +52,8 @@ impl TrayHandle {
         let paste = MenuItem::with_id("paste-last", "Paste last transcript", true, None);
         let open = MenuItem::with_id("open", "Open Bars", true, None);
         let setup = MenuItem::with_id("setup", "Finish setup…", true, None);
-        let update = MenuItem::with_id("update", crate::shell::update_label(None), true, None);
+        let update_label = crate::shell::update_label(&crate::state::UpdateStatus::Unknown);
+        let update = MenuItem::with_id("update", &update_label, true, None);
         let quit = MenuItem::with_id("quit", "Quit Bars", true, None);
         let menu = Menu::new();
         let built = menu.append_items(&[
@@ -117,7 +118,7 @@ impl TrayHandle {
                 toggle,
                 setup,
                 update,
-                update_version: None,
+                update_label,
                 menu,
                 needs_setup: false,
             }),
@@ -150,11 +151,11 @@ impl TrayHandle {
         }));
     }
 
-    /// The newer version on offer, if any.
-    pub fn set_update(&mut self, version: Option<String>) {
-        if version != self.update_version {
-            self.update.set_text(crate::shell::update_label(version.as_deref()));
-            self.update_version = version;
+    /// The update item's label (`shell::update_label`).
+    pub fn set_update(&mut self, label: String) {
+        if label != self.update_label {
+            self.update.set_text(&label);
+            self.update_label = label;
         }
     }
 

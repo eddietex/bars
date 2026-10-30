@@ -214,7 +214,7 @@ impl SettingsView {
             UpdateStatus::InstallFailed(_, why) | UpdateStatus::Failed(why) => why.clone(),
         };
         let update_button = match &update {
-            UpdateStatus::Available(_) => button("update", crate::shell::update_action(), ButtonKind::Primary, p),
+            UpdateStatus::Available(r) => button("update", crate::shell::update_action(r), ButtonKind::Primary, p),
             UpdateStatus::InstallFailed(..) => button("update", "Try again", ButtonKind::Primary, p),
             UpdateStatus::Installed(_) => button("update", "Restart", ButtonKind::Primary, p),
             UpdateStatus::Checking | UpdateStatus::Installing(_) => {

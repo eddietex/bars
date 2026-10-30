@@ -132,7 +132,7 @@ impl SettingsView {
         let st = self.state.read(cx);
         let needs_setup = !st.setup_complete();
         let status = status_line(st);
-        let update = st.update.offered().map(|r| (r.version.clone(), st.update.clone()));
+        let update = st.update.offered().map(|r| (r.clone(), st.update.clone()));
         let pages = [Page::Home, Page::General, Page::Model, Page::Dictionary, Page::History];
         let item = |page: Page, attention: bool, cx: &mut Context<Self>| {
             let active = self.page == page;
@@ -179,7 +179,7 @@ impl SettingsView {
                     .children(pages.into_iter().map(|page| item(page, false, cx).into_any_element())),
             )
             .child(div().flex_1())
-            .when_some(update, |el, (version, status)| el.child(self.update_banner(version, status, cx)))
+            .when_some(update, |el, (release, status)| el.child(self.update_banner(release, status, cx)))
             .child(item(Page::Setup, needs_setup, cx))
             .child(
                 h_row()
@@ -205,15 +205,23 @@ impl SettingsView {
 
 impl SettingsView {
     /// Above Setup while a newer Bars is on offer: what it is, and a button
-    /// to update (or download, where Bars can't install it itself).
-    fn update_banner(&self, version: String, status: UpdateStatus, cx: &mut Context<Self>) -> impl IntoElement {
+    /// to update (or download, where Bars can't install it itself), or to
+    /// restart into it once it's installed.
+    fn update_banner(
+        &self,
+        release: bars_core::update::Release,
+        status: UpdateStatus,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
         let p = cx.palette();
+        let version = &release.version;
         let (detail, action) = match status {
             UpdateStatus::Installing(_) => (format!("Installing ver. {version}…"), None),
             UpdateStatus::InstallFailed(..) => ("Couldn't install".to_string(), Some("Try again")),
-            UpdateStatus::Installed(_) => (format!("ver. {version} installed"), Some("Restart")),
-            _ => (format!("ver. {version}"), Some(crate::shell::update_action())),
+            UpdateStatus::Installed(_) => (format!("ver. {version}"), Some("Restart")),
+            _ => (format!("ver. {version}"), Some(crate::shell::update_action(&release))),
         };
+        let title = if matches!(status, UpdateStatus::Installed(_)) { "Update installed" } else { "New version available" };
         let state = self.state.clone();
         v_col()
             .mb(px(8.))
@@ -229,7 +237,7 @@ impl SettingsView {
                     .font_weight(FontWeight::MEDIUM)
                     .text_color(p.text)
                     .child(icon(I::Sparkles, p.accent_text, 15.))
-                    .child("New version available"),
+                    .child(title),
             )
             .child(
                 h_row()

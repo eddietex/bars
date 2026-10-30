@@ -81,10 +81,14 @@ the latest GitHub release, and sends nothing else. It
 only tells you, with a notification and in the tray menu; nothing is
 installed until you choose Update (tray menu, settings, or `bars --update`).
 That downloads the new version, checks its signature and installs it. On
-Windows the installer then restarts Bars; on macOS and Linux (the tarball)
-Bars asks whether to restart into it now. The Flatpak, and a copy installed
-where Bars can't write (`/usr/bin`), open the release page instead. The
-daily check can be turned off in the settings, under Updates.
+Windows the installer then restarts Bars, macOS restarts into it once
+you're not dictating, and Linux asks whether to restart now. On Linux the
+release tarball's `bin/bars` replaces itself, wherever you put it (if Bars
+can write there), and the release Flatpak reinstalls itself from the
+release's bundle (if it's installed for your user, not system-wide). Either
+way the new version has to start before it's kept. Builds from source and
+distro packages open the release page instead. The daily check can be
+turned off in the settings, under Updates.
 
 ## Speech models
 
@@ -220,9 +224,12 @@ Without the secrets the app is signed ad hoc and not notarized.
 
 In-app updates read `latest.json` from the latest published release (a
 draft is never "latest", so publishing the release is what offers it).
-`scripts/update-manifest.py` writes it from the macOS `.app.tar.gz` and the
-Windows installer, each signed with the updater key (secrets
-`UPDATER_PRIVATE_KEY` and `UPDATER_PRIVATE_KEY_PASSWORD`). The key is made
+`scripts/update-manifest.py` writes it from the macOS `.app.tar.gz`, the
+Windows installer, and the Linux tarball and Flatpak bundle, each signed
+with the updater key (secrets `UPDATER_PRIVATE_KEY` and
+`UPDATER_PRIVATE_KEY_PASSWORD`). Only the release workflow's Linux builds
+update themselves: it builds them with `BARS_PACKAGE=tarball` or
+`BARS_PACKAGE=flatpak`. The key is made
 once with `cargo packager signer generate`; its public half goes in
 `PUBLIC_KEY` in `crates/bars-core/src/update.rs`. Keep the private key safe:
 installed copies only accept updates signed with it. Without the secrets no

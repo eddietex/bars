@@ -22,12 +22,11 @@ pub fn sync(enabled: bool) {
     }
     let Some(dir) = dirs_autostart() else { return };
     let path = dir.join(FILE);
-    let exe_path = std::env::current_exe().ok();
+    // The path Bars started from: once an update has replaced the binary,
+    // asking again would give "… (deleted)".
+    let exe_path = bars_core::paths::exe();
     // Never register a development build running out of a cargo target dir.
-    if exe_path
-        .as_ref()
-        .is_some_and(|p| p.components().any(|c| c.as_os_str() == "target"))
-    {
+    if exe_path.is_some_and(is_dev_build) {
         log::debug!("autostart: skipping for development build");
         return;
     }
@@ -78,7 +77,6 @@ async fn request_portal(_: bool) -> anyhow::Result<()> {
 }
 
 /// Development builds (run from a cargo `target` dir) never register.
-#[allow(dead_code)]
 fn is_dev_build(exe: &std::path::Path) -> bool {
     exe.components().any(|c| c.as_os_str() == "target")
 }
@@ -86,12 +84,12 @@ fn is_dev_build(exe: &std::path::Path) -> bool {
 #[cfg(any(target_os = "windows", target_os = "macos"))]
 mod native {
     pub fn sync(enabled: bool) {
-        let Ok(exe) = std::env::current_exe() else { return };
-        if super::is_dev_build(&exe) {
+        let Some(exe) = bars_core::paths::exe() else { return };
+        if super::is_dev_build(exe) {
             log::debug!("autostart: skipping for development build");
             return;
         }
-        if let Err(e) = set(enabled, &exe) {
+        if let Err(e) = set(enabled, exe) {
             log::warn!("autostart: {e:#}");
         }
     }

@@ -43,10 +43,11 @@ pub enum StateEvent {
     UpdateFound,
     /// A check the user asked for found nothing, or installing failed.
     UpdateResult,
-    /// The update is in place: Windows' installer takes over from here;
-    /// elsewhere Bars asks whether to restart into it.
+    /// The update is in place: Windows' installer takes over from here,
+    /// macOS restarts into it, and Linux asks whether to restart now.
     UpdateInstalled,
-    /// The user chose to restart into the installed update.
+    /// The user chose to restart into the installed update (once no
+    /// dictation is under way).
     RestartToUpdate,
     /// macOS: audio needs a fresh start of Bars.
     Restart,
@@ -247,7 +248,7 @@ impl AppState {
             }
             _ => return,
         };
-        if !update::can_install() {
+        if !release.installable() {
             self.send(Command::OpenUrl(update::RELEASE_PAGE.into()));
             return;
         }
@@ -262,8 +263,12 @@ impl AppState {
             let result = rx.recv().await.unwrap_or_else(|_| Err(anyhow::anyhow!("the installer stopped")));
             let _ = this.update(cx, |s, cx| {
                 match result {
-                    Ok(()) => {
-                        s.update = UpdateStatus::Installed(release);
+                    // The newest release, which may be newer than the one
+                    // offered.
+                    Ok(version) => {
+                        let mut installed = release;
+                        installed.version = version;
+                        s.update = UpdateStatus::Installed(installed);
                         cx.emit(StateEvent::UpdateInstalled);
                     }
                     Err(e) => {

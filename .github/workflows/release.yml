@@ -54,6 +54,12 @@ jobs:
           rm -rf /host/dotnet/* /host/android/* /host/ghc/* /host/codeql/*
           df -h /__w
       - uses: actions/checkout@v4
+      # This build reinstalls itself from the release's bundle when asked
+      # (crates/bars-core/src/update.rs); local builds don't.
+      - name: Mark the build as the release Flatpak
+        run: |
+          sed -i 's/^  env:$/  env:\n    BARS_PACKAGE: flatpak/' packaging/flatpak/xyz.hink.Bars.yml
+          grep -q '^    BARS_PACKAGE: flatpak$' packaging/flatpak/xyz.hink.Bars.yml
       - uses: flatpak/flatpak-github-actions/flatpak-builder@v6
         with:
           manifest-path: packaging/flatpak/xyz.hink.Bars.yml
@@ -88,7 +94,11 @@ jobs:
             libxcb1-dev libvulkan-dev libssl-dev libzstd-dev
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
+      # This build replaces itself from the release's tarball when asked
+      # (crates/bars-core/src/update.rs).
       - run: cargo build --release -p bars --locked
+        env:
+          BARS_PACKAGE: tarball
       - name: Package
         run: |
           dir=bars-linux-${{ matrix.arch }}
@@ -100,22 +110,10 @@ jobs:
           cp packaging/linux/70-bars.rules $dir/udev/
           cp README.md LICENSE THIRD_PARTY_NOTICES.txt $dir/
           tar czf $dir.tar.gz $dir
-      # The in-app updater checks downloads against this signature.
-      # Skipped without the key (forks).
-      - name: Sign for the updater
-        env:
-          BARS_UPDATER_KEY: ${{ secrets.UPDATER_PRIVATE_KEY }}
-          BARS_UPDATER_KEY_PASSWORD: ${{ secrets.UPDATER_PRIVATE_KEY_PASSWORD }}
-        run: |
-          [ -n "$BARS_UPDATER_KEY" ] || exit 0
-          cargo install cargo-packager --locked --version 0.11.8
-          cargo packager signer sign -k "$BARS_UPDATER_KEY" --password "$BARS_UPDATER_KEY_PASSWORD" bars-linux-${{ matrix.arch }}.tar.gz
       - uses: actions/upload-artifact@v4
         with:
           name: linux-tarball-${{ matrix.arch }}
-          path: |
-            bars-linux-${{ matrix.arch }}.tar.gz
-            bars-linux-${{ matrix.arch }}.tar.gz.sig
+          path: bars-linux-${{ matrix.arch }}.tar.gz
 
   windows:
     name: Windows (installer, ${{ matrix.arch }})
@@ -202,6 +200,20 @@ jobs:
         with:
           path: artifacts
           merge-multiple: true
+      # The in-app updater checks Linux downloads against these signatures,
+      # as macOS's and Windows' (signed in their jobs). Skipped without the
+      # key (forks).
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Sign the Linux files for the updater
+        env:
+          BARS_UPDATER_KEY: ${{ secrets.UPDATER_PRIVATE_KEY }}
+          BARS_UPDATER_KEY_PASSWORD: ${{ secrets.UPDATER_PRIVATE_KEY_PASSWORD }}
+        run: |
+          [ -n "$BARS_UPDATER_KEY" ] || exit 0
+          cargo install cargo-packager --locked --version 0.11.8
+          for f in artifacts/bars-linux-*.tar.gz artifacts/bars-*.flatpak; do
+            cargo packager signer sign -k "$BARS_UPDATER_KEY" --password "$BARS_UPDATER_KEY_PASSWORD" "$f"
+          done
       # What the in-app updater reads: releases/latest/download/latest.json.
       # A draft is never "latest", so publishing the release offers it.
       - run: python3 scripts/update-manifest.py "${{ inputs.version || github.ref_name }}" artifacts
