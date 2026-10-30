@@ -133,7 +133,9 @@ fn installed_app() -> bool {
     static INSTALLED: std::sync::LazyLock<bool> = std::sync::LazyLock::new(|| match PACKAGE {
         Some("tarball") => !crate::paths::is_flatpak() && crate::paths::exe().is_some_and(replaceable),
         Some("flatpak") => {
-            let home = dirs::home_dir().unwrap_or_default();
+            // As the real path, which app-path is (/var/home on Silverblue,
+            // say, where /home is a link to it).
+            let home = dirs::home_dir().and_then(|h| h.canonicalize().ok()).unwrap_or_default();
             std::fs::read_to_string("/.flatpak-info").is_ok_and(|info| can_reinstall(&info, &home))
         }
         _ => false,
